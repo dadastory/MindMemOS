@@ -230,6 +230,38 @@ async def test_qdrant_patch_memory_updates_payload_and_bm25_in_one_call(qdrant_s
 
 
 @pytest.mark.asyncio
+async def test_qdrant_compare_and_set_memory_payload_rejects_stale_count(qdrant_store):
+    memory_id = "00000000-0000-0000-0000-000000000011"
+    point = _point(memory_id, "reinforced content", [1.0, 0.0], 1)
+    point.payload.update({"reinforcement_count": 0, "metadata": {}})
+    await qdrant_store.upsert_memories([point])
+
+    first = await qdrant_store.compare_and_set_memory_payload(
+        "proj",
+        memory_id,
+        {"reinforcement_count": 1, "metadata": {"attempt": "first"}},
+        expected_payload={"status": "active", "reinforcement_count": 0},
+    )
+    stale = await qdrant_store.compare_and_set_memory_payload(
+        "proj",
+        memory_id,
+        {"reinforcement_count": 99, "metadata": {"attempt": "stale"}},
+        expected_payload={"status": "active", "reinforcement_count": 0},
+    )
+    second = await qdrant_store.compare_and_set_memory_payload(
+        "proj",
+        memory_id,
+        {"reinforcement_count": 2, "metadata": {"attempt": "second"}},
+        expected_payload={"status": "active", "reinforcement_count": 1},
+    )
+
+    assert first.payload["reinforcement_count"] == 1
+    assert stale.payload["reinforcement_count"] == 1
+    assert second.payload["reinforcement_count"] == 2
+    assert second.payload["metadata"] == {"attempt": "second"}
+
+
+@pytest.mark.asyncio
 async def test_qdrant_filtering_is_caller_owned(qdrant_store):
     await qdrant_store.upsert_memories(
         [

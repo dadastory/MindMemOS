@@ -117,6 +117,12 @@ class MemoryDbMemoryUpdateCommand(BaseModel):
     """If set, skip this update when the existing metadata already has the same
     value for this key as ``metadata_patch[dedup_metadata_key]``.  Used to make
     reinforcement commands idempotent across Kafka retries."""
+    optimistic_lock_token: str | None = None
+    """When set on a reinforcement delta, use storage-level optimistic conflict handling."""
+    optimistic_lock_retries: int = Field(default=0, ge=0)
+    """Maximum conditional-write retries after the initial optimistic attempt."""
+    metadata_list_limit: int = Field(default=0, ge=0)
+    """Bound for unique list metadata merged during optimistic reinforcement."""
     dense_vector: list[float] | None = None
     """Dense semantic vector to replace on Qdrant.  Set by UPDATE actions that
     recompute the embedding after content changes."""
@@ -400,6 +406,8 @@ class MemoryDbMutationResult(BaseModel):
     status: str = "ok"
     memory_id: str
     changed: bool = True
+
+
 class MemoryDbWriteSummary(BaseModel):
     """Purpose: Summarize a completed write plan dispatch at the DB boundary.
 

@@ -146,6 +146,8 @@ algo_config:
     entity_rule_find_long_jieba_terms: true
     stopwords_zh_path:
     stopwords_en_path:
+    nlp_max_retries: 50
+    nlp_retry_base_delay: 0.1
   add:
     schema:
       entity_modeling_path: config/presets/entity_modeling_locomo.json
@@ -178,6 +180,31 @@ algo_config:
         streaming_window_size: 15
       drain:
         episode_generation_max_retries: 3
+    structured:
+      extraction:
+        max_repair_attempts: 1
+        max_entities: 20
+        max_properties_per_entity: 15
+      dedup:
+        vector_enabled: true
+        candidate_top_k: 5
+        create_below: 0.82
+        same_batch_group_at_or_above: 0.97
+        merge_mode: llm_on_ambiguous
+        max_merge_candidates: 3
+      episode:
+        mode: single_pass
+        candidate_top_k: 5
+      graph:
+        mode: entity_property_episode
+      embedding:
+        batch_size: 64
+      concurrency:
+        max_extract_concurrency: 5
+        lock_stripes: 64
+        max_write_conflict_retries: 8
+      history:
+        max_source_refs: 100
     vanilla:
       chunk_soft_token_budget: 26000
       chunk_hard_token_budget: 32000
@@ -218,6 +245,7 @@ algo_config:
     consolidation_model:
   search:
     request_top_k_max: 100
+    include_patches: true
     retention:
       min_token_budget: 1
       max_token_budget: 128000

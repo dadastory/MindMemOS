@@ -224,6 +224,12 @@ class MemoryDbReader:
         records = await self._clients.qdrant.get_memories(ctx.project_id, memory_ids)
         return [to_memory_view_from_record(record) for record in records]
 
+    @traced("memory_db.get_entity")
+    async def get_entity(self, ctx: MemoryRequestContext, entity_id: str) -> EntityView | None:
+        """Read one entity in the request project without hydrating its memories."""
+
+        record = await self._clients.qdrant.get_entity(ctx.project_id, entity_id)
+        return to_entity_view_from_record(record) if record else None
 
     @traced("memory_db.list_memories_by_shared_entities")
     async def list_memories_by_shared_entities(

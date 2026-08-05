@@ -199,6 +199,9 @@ class AddPipelineInput(BaseModel):
     metadata: dict = Field(default_factory=dict)
     """Business extension metadata."""
 
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=256)
+    """Opaque caller key used by algorithms that support idempotent ingestion."""
+
     prompt_language: Literal["EN", "ZH"] | None = None
     """Optional request-level prompt language for extraction."""
 

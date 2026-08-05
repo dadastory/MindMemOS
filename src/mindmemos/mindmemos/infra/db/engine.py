@@ -259,6 +259,23 @@ class QdrantEngine:
             payload=self.safe_payload(payload),
         )
 
+    async def compare_and_set_payload(
+        self,
+        collection: str,
+        *,
+        selector: qmodels.Filter,
+        payload: dict[str, Any],
+    ) -> None:
+        """Conditionally patch payload fields using a Qdrant filter selector."""
+
+        await self._client.set_payload(
+            collection_name=collection,
+            points=selector,
+            payload=self.safe_payload(payload),
+            wait=True,
+            ordering=qmodels.WriteOrdering.STRONG,
+        )
+
     async def delete(self, collection: str, point_ids: list[str]) -> None:
         """Delete points by id (no-op on empty input)."""
 

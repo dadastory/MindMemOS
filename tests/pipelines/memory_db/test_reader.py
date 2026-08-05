@@ -85,7 +85,9 @@ class FakeQdrant:
         self.memory_sparse_searches.append((project_id, vector, filter_, limit))
         return []
 
-    async def search_memory_hybrid(self, project_id, dense_vector, sparse_vector, *, filter_=None, limit=10, dense_limit=None, sparse_limit=None):
+    async def search_memory_hybrid(
+        self, project_id, dense_vector, sparse_vector, *, filter_=None, limit=10, dense_limit=None, sparse_limit=None
+    ):
         self.memory_hybrid_searches.append((project_id, dense_vector, sparse_vector, filter_, limit))
         return []
 
@@ -122,6 +124,18 @@ class FakeNeo4j:
     async def get_entity_neighbors(self, project_id, entity_id, *, direction="both", rel_type=None, limit=None):
         self.neighbor_calls.append((project_id, entity_id, direction, rel_type, limit))
         return self.neighbor_rows[:limit] if limit is not None else self.neighbor_rows
+
+
+@pytest.mark.asyncio
+async def test_get_entity_is_project_scoped_and_returns_standard_view() -> None:
+    qdrant = FakeQdrant()
+    qdrant.entity_records["ent-1"] = _entity_record("ent-1", user_id="user-1")
+    reader = MemoryDbReader(clients=SimpleNamespace(qdrant=qdrant, neo4j=FakeNeo4j()))
+
+    entity = await reader.get_entity(make_context(), "ent-1")
+
+    assert entity is not None and entity.entity_id == "ent-1"
+    assert qdrant.get_entity_calls == [("proj-1", "ent-1", False)]
 
 
 @pytest.mark.asyncio

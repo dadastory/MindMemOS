@@ -90,6 +90,32 @@ def test_request_context_and_service_add_input_use_shared_contracts() -> None:
     assert add_input.metadata == {"trace": "test"}
 
 
+def test_add_input_and_record_preserve_generic_idempotency_key() -> None:
+    inp = AddPipelineInput(
+        messages=[DialogueMessage(role="user", content="Remember Qdrant.")],
+        idempotency_key="source:session:event-1",
+    )
+
+    point = to_add_record_point(
+        inp,
+        None,
+        ctx=make_context(),
+        request_submitted_at=datetime(2026, 1, 1, tzinfo=UTC),
+        task_completed_at=None,
+    )
+
+    assert inp.idempotency_key == "source:session:event-1"
+    assert point.payload["idempotency_key"] == "source:session:event-1"
+
+
+def test_add_input_rejects_oversized_idempotency_key() -> None:
+    with pytest.raises(ValueError):
+        AddPipelineInput(
+            messages=[DialogueMessage(role="user", content="Remember Qdrant.")],
+            idempotency_key="x" * 257,
+        )
+
+
 def test_service_add_input_rejects_unknown_fields() -> None:
     with pytest.raises(ValueError):
         AddPipelineInput(

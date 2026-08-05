@@ -114,6 +114,9 @@ class AddRequest(ActorIdentityRequest):
     metadata: dict[str, Any] = Field(default_factory=dict)
     """Business extension metadata."""
 
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=256)
+    """Optional opaque identifier for convergent retries."""
+
     prompt_language: Literal["EN", "ZH"] | None = None
     """Optional request-level prompt language for extraction."""
 

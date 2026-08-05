@@ -86,6 +86,36 @@ algo_config:
 
 
 @pytest.mark.parametrize(
+    "body",
+    [
+        "extraction:\n          max_repair_attempts: 2",
+        "dedup:\n          candidate_top_k: 2\n          max_merge_candidates: 3",
+        "dedup:\n          create_below: 0.98\n          same_batch_group_at_or_above: 0.97",
+        "embedding:\n          batch_size: 0",
+        "concurrency:\n          max_extract_concurrency: 0",
+        "concurrency:\n          max_write_conflict_retries: 0",
+    ],
+)
+def test_structured_add_rejects_unbounded_or_inconsistent_settings(tmp_path, body: str) -> None:
+    config_path = tmp_path / "dev.yaml"
+    config_path.write_text(
+        f"""
+algo_config:
+  add:
+    structured:
+      {body}
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        with pytest.raises(InvalidConfigError, match="algo_config.add.structured"):
+            init_config(config_path=config_path)
+    finally:
+        reset_config()
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("dedup_threshold", 0),

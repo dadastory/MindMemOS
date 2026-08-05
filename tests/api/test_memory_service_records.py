@@ -384,6 +384,38 @@ async def test_memory_service_records_add_result_for_vanilla_add_pipeline() -> N
 
 
 @pytest.mark.asyncio
+async def test_structured_add_reuses_add_record_id_for_same_idempotency_key() -> None:
+    recorder = FakeRecorder()
+    pipeline = FakeAddPipeline()
+    service = make_service(
+        add_pipeline=pipeline,
+        add_pipeline_name="structured_add",
+        operation_recorder=recorder,
+    )
+    request = add_request().model_copy(update={"idempotency_key": "source:task:generation:algorithm:event"})
+
+    await service.add(make_context("structured"), request)
+    await service.add(make_context("structured"), request)
+
+    assert pipeline.sync_calls[0]["add_record_id"] == pipeline.sync_calls[1]["add_record_id"]
+
+
+@pytest.mark.asyncio
+async def test_structured_add_maps_top_level_task_evidence_into_memory_metadata() -> None:
+    pipeline = FakeAddPipeline()
+    service = make_service(
+        add_pipeline=pipeline,
+        add_pipeline_name="structured_add",
+        operation_recorder=FakeRecorder(),
+    )
+    request = add_request().model_copy(update={"score": 0.75, "task_id": "task-9"})
+
+    await service.add(make_context("structured"), request)
+
+    assert pipeline.sync_calls[0]["inp"].metadata == {"score": 0.75, "task_id": "task-9"}
+
+
+@pytest.mark.asyncio
 async def test_memory_service_records_add_result_for_non_vanilla_add_pipeline() -> None:
     recorder = FakeRecorder()
     pipeline = FakeAddPipeline()

@@ -182,6 +182,7 @@ def to_add_record_point(
             "prompt_language": inp.prompt_language,
             "feedback_processed": False,
             "metadata": dict(inp.metadata),
+            "idempotency_key": inp.idempotency_key,
             "consolidation_status": "pending",
             "consolidated_at": None,
             "consolidation_run_id": None,

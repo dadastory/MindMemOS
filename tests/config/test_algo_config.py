@@ -9,6 +9,7 @@ from mindmemos.config import (
     MemoryRetentionConfig,
     SchemaAddConfig,
     SearchConfig,
+    StructuredAddConfig,
     TextProcessingConfig,
     VanillaAddConfig,
     VanillaSearchConfig,
@@ -25,6 +26,7 @@ def test_dev_example_declares_all_algorithm_config_fields() -> None:
     _assert_declares_fields(raw_algo_config, MemoryAlgoConfig)
     _assert_declares_fields(raw_algo_config["add"]["schema"], SchemaAddConfig)
     _assert_declares_fields(raw_algo_config["add"]["vanilla"], VanillaAddConfig)
+    _assert_declares_fields(raw_algo_config["add"]["structured"], StructuredAddConfig)
     _assert_declares_fields(raw_algo_config["add"]["schema"]["chunker"], EpisodesChunkerConfig)
     _assert_declares_fields(raw_algo_config["text_processing"], TextProcessingConfig)
     _assert_declares_fields(raw_algo_config["search"], SearchConfig)
@@ -109,6 +111,27 @@ def test_schema_add_defaults_align_with_original_generation_config() -> None:
     assert schema.higher_order.top_k == 10
     assert schema.higher_order.min_evidence_count == 2
     assert schema.episode_edge.top_k == 10
+
+
+def test_structured_add_defaults_are_bounded_and_generic() -> None:
+    structured = build_config(config_path="config/mindmemos/dev.example.yaml").algo_config.add.structured
+
+    assert structured.extraction.max_repair_attempts == 1
+    assert structured.extraction.max_entities == 20
+    assert structured.dedup.candidate_top_k == 5
+    assert 0 <= structured.dedup.create_below < structured.dedup.same_batch_group_at_or_above <= 1
+    assert structured.dedup.merge_mode == "llm_on_ambiguous"
+    assert structured.episode.mode == "single_pass"
+    assert structured.episode.candidate_top_k == 5
+    assert structured.graph.mode == "entity_property_episode"
+    assert structured.embedding.batch_size == 64
+    assert structured.concurrency.max_extract_concurrency == 5
+    assert structured.concurrency.max_write_conflict_retries == 8
+    assert not hasattr(structured.extraction, "enabled")
+    assert not hasattr(structured.dedup, "exact_enabled")
+    assert not hasattr(structured.history, "preserve_revisions")
+    assert not hasattr(structured.history, "preserve_sources")
+    assert "llm4ad" not in repr(structured).lower()
 
 
 def test_dreaming_config_declares_concurrency() -> None:

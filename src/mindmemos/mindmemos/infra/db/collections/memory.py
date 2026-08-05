@@ -149,6 +149,31 @@ class MemoryRepository(CollectionRepository):
             return
         await self._engine.set_payload(self.collection_for_project(project_id), memory_id, payload)
 
+    async def compare_and_set_payload(
+        self,
+        project_id: str,
+        memory_id: str,
+        payload: dict[str, Any],
+        *,
+        expected_payload: dict[str, Any],
+    ) -> QdrantRecord | None:
+        """Patch one memory only when its current payload matches expected scalar values."""
+
+        if not await self._project_collection_exists(project_id):
+            return None
+        conditions: list[Any] = [qmodels.HasIdCondition(has_id=[memory_id])]
+        conditions.extend(
+            qmodels.FieldCondition(key=key, match=qmodels.MatchValue(value=value))
+            for key, value in expected_payload.items()
+        )
+        selector = self._engine.project_filter(project_id, conditions=conditions)
+        await self._engine.compare_and_set_payload(
+            self.collection_for_project(project_id),
+            selector=selector,
+            payload=payload,
+        )
+        return await self.get(project_id, memory_id)
+
     async def patch(
         self,
         project_id: str,

@@ -553,6 +553,7 @@ def _validate_algo(cfg: Any) -> None:
         )
 
     _validate_schema_add(cfg.algo_config.add.schema)
+    _validate_structured_add(cfg.algo_config.add.structured)
     _validate_search(cfg.algo_config.search)
 
 
@@ -561,6 +562,53 @@ def _validate_schema_add(schema_add: Any) -> None:
         raise InvalidConfigError(
             "algo_config.add.schema.chunker.max_episode_length",
             support=">= algo_config.add.schema.chunker.min_episode_length",
+        )
+
+
+def _validate_structured_add(structured: Any) -> None:
+    if not 0 <= structured.extraction.max_repair_attempts <= 1:
+        raise InvalidConfigError(
+            "algo_config.add.structured.extraction.max_repair_attempts",
+            support="0 or 1",
+        )
+    for path, value in (
+        ("extraction.max_entities", structured.extraction.max_entities),
+        ("extraction.max_properties_per_entity", structured.extraction.max_properties_per_entity),
+        ("dedup.candidate_top_k", structured.dedup.candidate_top_k),
+        ("dedup.max_merge_candidates", structured.dedup.max_merge_candidates),
+        ("episode.candidate_top_k", structured.episode.candidate_top_k),
+        ("embedding.batch_size", structured.embedding.batch_size),
+        ("concurrency.max_extract_concurrency", structured.concurrency.max_extract_concurrency),
+        ("concurrency.lock_stripes", structured.concurrency.lock_stripes),
+        ("concurrency.max_write_conflict_retries", structured.concurrency.max_write_conflict_retries),
+        ("history.max_source_refs", structured.history.max_source_refs),
+    ):
+        if value <= 0:
+            raise InvalidConfigError(f"algo_config.add.structured.{path}", support="positive integer")
+    if structured.dedup.max_merge_candidates > structured.dedup.candidate_top_k:
+        raise InvalidConfigError(
+            "algo_config.add.structured.dedup.max_merge_candidates",
+            support="<= algo_config.add.structured.dedup.candidate_top_k",
+        )
+    if structured.dedup.merge_mode not in {"llm_on_ambiguous", "create_on_ambiguous"}:
+        raise InvalidConfigError(
+            "algo_config.add.structured.dedup.merge_mode",
+            support="llm_on_ambiguous or create_on_ambiguous",
+        )
+    if structured.episode.mode != "single_pass":
+        raise InvalidConfigError(
+            "algo_config.add.structured.episode.mode",
+            support="single_pass",
+        )
+    if structured.graph.mode != "entity_property_episode":
+        raise InvalidConfigError(
+            "algo_config.add.structured.graph.mode",
+            support="entity_property_episode",
+        )
+    if not 0 <= structured.dedup.create_below < structured.dedup.same_batch_group_at_or_above <= 1:
+        raise InvalidConfigError(
+            "algo_config.add.structured.dedup",
+            support="0 <= create_below < same_batch_group_at_or_above <= 1",
         )
 
 

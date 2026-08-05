@@ -13,6 +13,16 @@ from .schema import (
     SchemaAddHigherOrderConfig,
     SchemaAddMergeConfig,
 )
+from .structured import (
+    StructuredAddConfig,
+    StructuredConcurrencyConfig,
+    StructuredDedupConfig,
+    StructuredEmbeddingConfig,
+    StructuredEpisodeConfig,
+    StructuredExtractionConfig,
+    StructuredGraphConfig,
+    StructuredHistoryConfig,
+)
 from .vanilla import VanillaAddConfig
 
 
@@ -21,6 +31,7 @@ class AddAlgoConfig:
     """Configuration for add-operation algorithms."""
 
     schema: SchemaAddConfig = field(default_factory=SchemaAddConfig)
+    structured: StructuredAddConfig = field(default_factory=StructuredAddConfig)
     vanilla: VanillaAddConfig = field(default_factory=VanillaAddConfig)
 
 
@@ -33,5 +44,13 @@ __all__ = [
     "SchemaAddExtractionConfig",
     "SchemaAddHigherOrderConfig",
     "SchemaAddMergeConfig",
+    "StructuredAddConfig",
+    "StructuredConcurrencyConfig",
+    "StructuredDedupConfig",
+    "StructuredEmbeddingConfig",
+    "StructuredEpisodeConfig",
+    "StructuredExtractionConfig",
+    "StructuredGraphConfig",
+    "StructuredHistoryConfig",
     "VanillaAddConfig",
 ]

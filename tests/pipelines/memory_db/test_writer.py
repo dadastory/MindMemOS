@@ -1,3 +1,5 @@
+import asyncio
+from copy import deepcopy
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -212,6 +214,68 @@ class FakeQdrant:
         self.deleted.append((project_id, memory_id))
 
 
+class ConcurrentCasQdrant(FakeQdrant):
+    def __init__(self, *, always_conflict: bool = False) -> None:
+        super().__init__(
+            records={
+                "mem-1": SimpleNamespace(
+                    point_id="mem-1",
+                    payload={
+                        "project_id": "proj-1",
+                        "status": "active",
+                        "reinforcement_count": 0,
+                        "metadata": {},
+                    },
+                )
+            }
+        )
+        self._prefetch_count = 0
+        self._prefetch_ready = asyncio.Event()
+        self._cas_lock = asyncio.Lock()
+        self.cas_calls = 0
+        self.always_conflict = always_conflict
+
+    def snapshot(self):
+        record = self.records["mem-1"]
+        return SimpleNamespace(point_id=record.point_id, payload=deepcopy(record.payload))
+
+    async def get_memories(self, project_id: str, memory_ids: list[str], *, with_vectors: bool = False):
+        self.get_memories_calls.append((project_id, list(memory_ids), with_vectors))
+        snapshot = self.snapshot()
+        self._prefetch_count += 1
+        if self._prefetch_count == 2:
+            self._prefetch_ready.set()
+        await asyncio.wait_for(self._prefetch_ready.wait(), timeout=1)
+        return [snapshot]
+
+    async def get_memory(self, project_id: str, memory_id: str, *, with_vectors: bool = False):
+        self.get_memory_calls.append((project_id, memory_id, with_vectors))
+        return self.snapshot()
+
+    async def patch_memory(self, project_id, memory_id, payload, **kwargs):
+        await asyncio.sleep(0)
+        self.records[memory_id].payload.update(deepcopy(payload))
+        await super().patch_memory(project_id, memory_id, payload, **kwargs)
+
+    async def compare_and_set_memory_payload(
+        self,
+        project_id: str,
+        memory_id: str,
+        payload: dict,
+        *,
+        expected_payload: dict,
+    ):
+        self.cas_calls += 1
+        async with self._cas_lock:
+            current = self.records[memory_id]
+            if self.always_conflict or any(
+                current.payload.get(key) != value for key, value in expected_payload.items()
+            ):
+                return self.snapshot()
+            current.payload.update(deepcopy(payload))
+            return self.snapshot()
+
+
 class FakeNeo4j:
     def __init__(
         self,
@@ -245,10 +309,12 @@ class FakeNeo4j:
             raise RuntimeError("graph content update failed")
         self.content_updates.append((project_id, memory_id, content))
 
-    async def archive_memory_node(self, project_id: str, memory_id: str, *, reason: str | None = None):
+    async def archive_memory_node(
+        self, project_id: str, memory_id: str, *, reason: str | None = None, status: str = "archived"
+    ):
         if self.fail_archive:
             raise RuntimeError("archive failed")
-        self.archived.append((project_id, memory_id, reason))
+        self.archived.append((project_id, memory_id, reason, status))
 
     async def delete_memory_node(self, project_id: str, memory_id: str):
         if self.fail_delete:
@@ -530,7 +596,22 @@ async def test_update_without_content_does_not_touch_bm25_index():
     assert qdrant.patches[0]["dense_vector"] is None
     assert qdrant.patches[0]["sparse_vector"] is None
     assert neo4j.content_updates == []
-    assert neo4j.archived == [("proj-1", "mem-1", "unknown")]
+    assert neo4j.archived == [("proj-1", "mem-1", "unknown", "archived")]
+
+
+@pytest.mark.asyncio
+async def test_superseded_update_preserves_distinct_graph_lifecycle_status():
+    qdrant = FakeQdrant(record=SimpleNamespace(payload={"metadata": {}}))
+    neo4j = FakeNeo4j()
+    writer = MemoryDbWriter(clients=SimpleNamespace(qdrant=qdrant, neo4j=neo4j))
+
+    await writer.update_memory(
+        make_context(),
+        MemoryDbUpdateCommand(memory_id="mem-1", status="superseded", reason="new evidence"),
+    )
+
+    assert qdrant.patches[0]["payload"]["status"] == "superseded"
+    assert neo4j.archived == [("proj-1", "mem-1", "new evidence", "superseded")]
 
 
 @pytest.mark.asyncio
@@ -611,6 +692,130 @@ async def test_repeated_reinforcement_delta_uses_prefetched_record_and_local_pat
     assert record.payload["reinforcement_count"] == 6
 
 
+def reinforcement_command(
+    token: str,
+    source: str,
+    *,
+    episode_id: str | None = None,
+    merged_memory_id: str | None = None,
+    retries: int = 8,
+) -> MemoryDbUpdateCommand:
+    return MemoryDbUpdateCommand(
+        memory_id="mem-1",
+        reinforcement_count_delta=1,
+        metadata_patch={
+            "last_reinforcement_event_id": token,
+            "source_add_record_ids": [source],
+            "idempotency_keys": [token],
+            "evidence_history": [{"idempotency_key": token, "add_record_id": source}],
+            "merged_memory_ids": [merged_memory_id] if merged_memory_id else [],
+        },
+        payload_patch={"episode_ids": [episode_id]} if episode_id else {},
+        dedup_metadata_key="last_reinforcement_event_id",
+        optimistic_lock_token=token,
+        optimistic_lock_retries=retries,
+        consistency="strong",
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reinforcements_use_cas_and_preserve_both_evidence_lists():
+    qdrant = ConcurrentCasQdrant()
+    first = MemoryDbWriter(clients=SimpleNamespace(qdrant=qdrant, neo4j=FakeNeo4j()))
+    second = MemoryDbWriter(clients=SimpleNamespace(qdrant=qdrant, neo4j=FakeNeo4j()))
+
+    results = await asyncio.gather(
+        first.apply_mutation_plan(
+            make_context(),
+            MemoryDbMutationPlan(memory_updates=[reinforcement_command("event-1", "add-1", episode_id="episode-1")]),
+            consistency="strong",
+        ),
+        second.apply_mutation_plan(
+            make_context(),
+            MemoryDbMutationPlan(memory_updates=[reinforcement_command("event-2", "add-2", episode_id="episode-2")]),
+            consistency="strong",
+        ),
+    )
+
+    payload = qdrant.records["mem-1"].payload
+    assert [result.mutations[0].changed for result in results] == [True, True]
+    assert payload["reinforcement_count"] == 2
+    assert set(payload["metadata"]["source_add_record_ids"]) == {"add-1", "add-2"}
+    assert set(payload["metadata"]["idempotency_keys"]) == {"event-1", "event-2"}
+    assert {item["idempotency_key"] for item in payload["metadata"]["evidence_history"]} == {
+        "event-1",
+        "event-2",
+    }
+    assert set(payload["episode_ids"]) == {"episode-1", "episode-2"}
+    assert qdrant.cas_calls >= 3
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reinforcements_preserve_all_merged_memory_ids():
+    qdrant = ConcurrentCasQdrant()
+    first = MemoryDbWriter(clients=SimpleNamespace(qdrant=qdrant, neo4j=FakeNeo4j()))
+    second = MemoryDbWriter(clients=SimpleNamespace(qdrant=qdrant, neo4j=FakeNeo4j()))
+
+    await asyncio.gather(
+        first.apply_mutation_plan(
+            make_context(),
+            MemoryDbMutationPlan(
+                memory_updates=[reinforcement_command("event-1", "add-1", merged_memory_id="duplicate-1")]
+            ),
+            consistency="strong",
+        ),
+        second.apply_mutation_plan(
+            make_context(),
+            MemoryDbMutationPlan(
+                memory_updates=[reinforcement_command("event-2", "add-2", merged_memory_id="duplicate-2")]
+            ),
+            consistency="strong",
+        ),
+    )
+
+    assert set(qdrant.records["mem-1"].payload["metadata"]["merged_memory_ids"]) == {
+        "duplicate-1",
+        "duplicate-2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_concurrent_replay_of_same_reinforcement_token_counts_once():
+    qdrant = ConcurrentCasQdrant()
+    first = MemoryDbWriter(clients=SimpleNamespace(qdrant=qdrant, neo4j=FakeNeo4j()))
+    second = MemoryDbWriter(clients=SimpleNamespace(qdrant=qdrant, neo4j=FakeNeo4j()))
+    command = reinforcement_command("event-1", "add-1")
+
+    results = await asyncio.gather(
+        first.apply_mutation_plan(make_context(), MemoryDbMutationPlan(memory_updates=[command]), consistency="strong"),
+        second.apply_mutation_plan(
+            make_context(), MemoryDbMutationPlan(memory_updates=[command]), consistency="strong"
+        ),
+    )
+
+    payload = qdrant.records["mem-1"].payload
+    assert sorted(result.mutations[0].changed for result in results) == [False, True]
+    assert payload["reinforcement_count"] == 1
+    assert payload["metadata"]["source_add_record_ids"] == ["add-1"]
+
+
+@pytest.mark.asyncio
+async def test_reinforcement_cas_exhaustion_raises_instead_of_losing_increment():
+    qdrant = ConcurrentCasQdrant(always_conflict=True)
+    qdrant._prefetch_ready.set()
+    writer = MemoryDbWriter(clients=SimpleNamespace(qdrant=qdrant, neo4j=FakeNeo4j()))
+
+    with pytest.raises(MemoryUpdateError, match="optimistic update conflict"):
+        await writer.apply_mutation_plan(
+            make_context(),
+            MemoryDbMutationPlan(memory_updates=[reinforcement_command("event-1", "add-1", retries=2)]),
+            consistency="strong",
+        )
+
+    assert qdrant.records["mem-1"].payload["reinforcement_count"] == 0
+    assert qdrant.cas_calls == 3
+
+
 @pytest.mark.asyncio
 async def test_soft_delete_missing_memory_does_not_create_graph_node():
     qdrant = FakeQdrant(record=None)
@@ -639,7 +844,7 @@ async def test_delete_archives_without_physical_deletes():
     assert qdrant.deleted == []
     assert neo4j.deleted == []
     assert qdrant.patches[0]["payload"]["status"] == "archived"
-    assert neo4j.archived == [("proj-1", "mem-1", "user_request")]
+    assert neo4j.archived == [("proj-1", "mem-1", "user_request", "archived")]
 
 
 @pytest.mark.asyncio

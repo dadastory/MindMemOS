@@ -10,6 +10,7 @@ from ...errors import MemoryNotFoundError, ResourceNotFoundError
 from ...logging import get_logger, traced
 from ...pipelines import create_pipeline
 from ...pipelines.add import AddPipeline
+from ...pipelines.add.structured.identity import structured_add_record_id
 from ...pipelines.delete import DefaultDeletePipeline, DeletePipeline
 from ...pipelines.dreaming import DreamingPipeline
 from ...pipelines.feedback import FeedbackPipeline
@@ -65,6 +66,25 @@ logger = get_logger(__name__)
 
 PipelineKind = Literal["add", "search", "get", "delete", "update", "feedback", "dreaming"]
 SEARCH_PIPELINE_NAME = "search_pipeline"
+
+
+def _add_record_id(ctx, payload) -> str:
+    if ctx.memory_algorithm == "structured" and payload.idempotency_key:
+        return structured_add_record_id(ctx, payload.idempotency_key)
+    return str(uuid4())
+
+
+def _with_structured_evidence_metadata(ctx, request: AddRequest, payload):
+    """Preserve generic request evidence in structured-memory metadata."""
+
+    if ctx.memory_algorithm != "structured":
+        return payload
+    metadata = dict(payload.metadata)
+    if request.score is not None:
+        metadata["score"] = request.score
+    if request.task_id is not None:
+        metadata["task_id"] = request.task_id
+    return payload.model_copy(update={"metadata": metadata})
 
 
 class MemoryService:
@@ -171,7 +191,8 @@ class MemoryService:
             raise NotImplementedError("add pipeline implementation is not wired yet")
         ctx = to_memory_request_context(auth, request, require_user_id=True)
         payload = to_add_pipeline_input(request)
-        add_record_id = str(uuid4())
+        payload = _with_structured_evidence_metadata(ctx, request, payload)
+        add_record_id = _add_record_id(ctx, payload)
         request_submitted_at = utcnow()
         config_ctx = await self._provider_config_context(ctx)
         with config_ctx:
@@ -202,6 +223,7 @@ class MemoryService:
             raise NotImplementedError("add pipeline implementation is not wired yet")
         ctx = to_memory_request_context(auth, request, require_user_id=True)
         payload = to_add_pipeline_input(request)
+        payload = _with_structured_evidence_metadata(ctx, request, payload)
         if payload.mode != "sync":
             yield {
                 "event": "error",
@@ -210,7 +232,7 @@ class MemoryService:
             }
             return
 
-        add_record_id = str(uuid4())
+        add_record_id = _add_record_id(ctx, payload)
         request_submitted_at = utcnow()
         config_ctx = await self._provider_config_context(ctx)
         with config_ctx:
@@ -314,11 +336,7 @@ class MemoryService:
                             "event": "completed",
                             "stage": "completed",
                             "message": "Add completed.",
-                            "data": {
-                                "memories": [
-                                    memory.model_dump(mode="json") for memory in result.memories
-                                ]
-                            },
+                            "data": {"memories": [memory.model_dump(mode="json") for memory in result.memories]},
                         }
                     )
             except AddStreamCancelled as exc:
