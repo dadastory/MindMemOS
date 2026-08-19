@@ -187,7 +187,7 @@ class ModelEndpointConfig:
     tpm: int | None = None
     """Allowed tokens per minute."""
 
-    timeout: int = 600
+    timeout: float = 600.0
     """Per-request timeout in seconds."""
 
     num_retries: int = 50

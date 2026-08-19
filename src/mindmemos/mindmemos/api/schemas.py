@@ -24,11 +24,12 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from ..typing import (
     AddMode,
     DialogueMessage,
+    DocumentBlock,
     FileMessage,
     MemoryAddEventItem,
     MemorySearchItem,
@@ -104,14 +105,20 @@ class AddRequest(ActorIdentityRequest):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    messages: list[DialogueMessage | UrlMessage | FileMessage | TextMessage] = Field(min_length=1)
+    messages: list[DialogueMessage | UrlMessage | FileMessage | TextMessage] = Field(default_factory=list)
     """Message list supporting dialogue, URL, file, and plain text messages."""
+
+    document_blocks: list[DocumentBlock] = Field(default_factory=list, max_length=128)
+    """Unordered blocks accepted by projects using the structured algorithm."""
 
     mode: AddMode = Field(default="sync")
     """Add mode: sync or async."""
 
     metadata: dict[str, Any] = Field(default_factory=dict)
     """Business extension metadata."""
+
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=256)
+    """Optional opaque identifier for convergent retries."""
 
     prompt_language: Literal["EN", "ZH"] | None = None
     """Optional request-level prompt language for extraction."""
@@ -142,8 +149,21 @@ class AddRequest(ActorIdentityRequest):
     @field_validator("messages")
     @classmethod
     def _messages_have_content(cls, messages):
+        if not messages:
+            raise ValueError("messages must contain at least one item when provided")
         validate_messages_have_content(messages)
         return messages
+
+    @model_validator(mode="after")
+    def _validate_source_shape(self):
+        if bool(self.messages) == bool(self.document_blocks):
+            raise ValueError("provide exactly one of messages or document_blocks")
+        block_ids = [block.block_id for block in self.document_blocks]
+        if len(block_ids) != len(set(block_ids)):
+            raise ValueError("document block IDs must be unique")
+        for block in self.document_blocks:
+            validate_messages_have_content(block.messages)
+        return self
 
 
 class SearchRequest(ActorIdentityRequest):
@@ -242,6 +262,9 @@ class DeleteRequest(BaseModel):
 
     id: NonEmptyStr = Field(alias="memory_id")
     """Memory ID"""
+
+    hard: bool = False
+    """Physically delete the memory instead of archiving it."""
 
 
 class UpdateRequest(ActorIdentityRequest):

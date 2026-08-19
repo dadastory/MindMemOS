@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from mindmemos.components.searcher.final_filter import SearchFinalFilter
+from mindmemos.config import init_config, reset_config
 from mindmemos.pipelines.search.base import SearchEngineOptions
 from mindmemos.pipelines.search.pipeline import SearchPipelineImpl
 from mindmemos.typing.memory import MemoryRequestContext
@@ -71,3 +72,20 @@ async def test_search_pipeline_rejects_unknown_strategy_with_available_names() -
 
     with pytest.raises(ValueError, match="Available strategies: default"):
         await pipeline.search(SearchPipelineInput(query="Qdrant", search_pipeline="schema"), make_context())
+
+
+def test_default_pipeline_builds_independent_structured_engine() -> None:
+    init_config(config_path="config/mindmemos/dev.example.yaml")
+    try:
+        pipeline = SearchPipelineImpl(
+            db_reader=SimpleNamespace(),
+            db_writer=SimpleNamespace(),
+        )
+
+        engine = pipeline._engine("structured")
+
+        assert engine is not None
+        assert type(engine).__name__ == "StructuredSearchEngine"
+        assert ".search.structured." in type(engine).__module__
+    finally:
+        reset_config()

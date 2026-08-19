@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from ...components.text import SparseVectorEncoder, TextPreprocessor, get_text_preprocessor
 from ...config import TextProcessingConfig, get_config
@@ -300,6 +302,9 @@ class MemoryDbWriter:
         if record is None:
             return to_mutation_result(req.memory_id, changed=False)
 
+        if req.reinforcement_count_delta and req.optimistic_lock_token:
+            return await self._update_reinforcement_optimistically(ctx, req, record)
+
         if req.dedup_metadata_key and req.dedup_metadata_key in req.metadata_patch:
             existing_metadata = dict(record.payload.get("metadata") or {})
             if existing_metadata.get(req.dedup_metadata_key) == req.metadata_patch[req.dedup_metadata_key]:
@@ -376,12 +381,13 @@ class MemoryDbWriter:
                     exc_info=True,
                 )
 
-        if req.status == "archived":
+        if req.status in {"archived", "superseded"}:
             try:
                 await self._clients.neo4j.archive_memory_node(
                     ctx.project_id,
                     req.memory_id,
                     reason=req.reason or "unknown",
+                    status=req.status,
                 )
             except Exception:
                 if req.consistency == "strong":
@@ -394,6 +400,72 @@ class MemoryDbWriter:
                 )
 
         return to_mutation_result(req.memory_id, changed=True)
+
+    async def _update_reinforcement_optimistically(
+        self,
+        ctx: MemoryRequestContext,
+        req: MemoryDbMemoryUpdateCommand,
+        record: QdrantRecord,
+    ) -> MemoryDbMutationResult:
+        """Apply one idempotent reinforcement without losing cross-instance increments."""
+
+        current = record
+        for attempt in range(req.optimistic_lock_retries + 1):
+            metadata = dict(current.payload.get("metadata") or {})
+            if req.dedup_metadata_key and metadata.get(req.dedup_metadata_key) == req.optimistic_lock_token:
+                return to_mutation_result(req.memory_id, changed=False)
+
+            status = str(current.payload.get("status") or "active")
+            if status != "active":
+                raise MemoryUpdateError(f"optimistic update conflict: memory {req.memory_id} is no longer active")
+            observed_count = int(current.payload.get("reinforcement_count") or 0)
+            attempt_token = str(uuid4())
+            merged_metadata = _merge_reinforcement_metadata(
+                metadata,
+                req.metadata_patch,
+                limit=req.metadata_list_limit,
+            )
+            merged_payload = _merge_reinforcement_payload(
+                current.payload,
+                req.payload_patch,
+                limit=req.metadata_list_limit,
+            )
+            merged_metadata["last_reinforcement_mutation_id"] = attempt_token
+            patch: dict[str, Any] = {
+                **merged_payload,
+                "update_at": datetime.now(UTC),
+                "reinforcement_count": observed_count + req.reinforcement_count_delta,
+                "metadata": merged_metadata,
+            }
+            latest = await self._clients.qdrant.compare_and_set_memory_payload(
+                ctx.project_id,
+                req.memory_id,
+                patch,
+                expected_payload={
+                    "status": status,
+                    "reinforcement_count": observed_count,
+                },
+            )
+            if latest is None:
+                return to_mutation_result(req.memory_id, changed=False)
+            latest_metadata = dict(latest.payload.get("metadata") or {})
+            if latest_metadata.get("last_reinforcement_mutation_id") == attempt_token:
+                current.payload.update(latest.payload)
+                return to_mutation_result(req.memory_id, changed=True)
+            if req.dedup_metadata_key and latest_metadata.get(req.dedup_metadata_key) == req.optimistic_lock_token:
+                return to_mutation_result(req.memory_id, changed=False)
+            current = latest
+            logger.info(
+                "memory_reinforcement_optimistic_conflict",
+                project_id=ctx.project_id,
+                memory_id=req.memory_id,
+                attempt=attempt + 1,
+                max_attempts=req.optimistic_lock_retries + 1,
+            )
+
+        raise MemoryUpdateError(
+            f"optimistic update conflict after {req.optimistic_lock_retries + 1} attempts: {req.memory_id}"
+        )
 
     @traced("memory_db.delete_memory")
     async def delete_memory(self, ctx: MemoryRequestContext, req: MemoryDbDeleteCommand) -> MemoryDbMutationResult:
@@ -414,6 +486,21 @@ class MemoryDbWriter:
     ) -> MemoryDbMutationResult:
         if record is None:
             return to_mutation_result(req.memory_id, changed=False)
+
+        if req.hard:
+            await self._clients.qdrant.delete_memory(ctx.project_id, req.memory_id)
+            try:
+                await self._clients.neo4j.delete_memory_node(ctx.project_id, req.memory_id)
+            except Exception:
+                if req.consistency == "strong":
+                    raise
+                logger.warning(
+                    "memory graph hard delete failed",
+                    project_id=ctx.project_id,
+                    memory_id=req.memory_id,
+                    exc_info=True,
+                )
+            return to_mutation_result(req.memory_id, changed=True)
 
         now = datetime.now(UTC)
         metadata = dict(record.payload.get("metadata") or {})
@@ -539,6 +626,61 @@ def _dense_from_command(req: MemoryDbUpdateCommand) -> list[float] | None:
     if not dense:
         raise MemoryUpdateError("memory update embedding cannot be empty")
     return list(dense)
+
+
+def _merge_reinforcement_metadata(
+    existing: dict[str, Any],
+    requested: dict[str, Any],
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    """Merge bounded evidence lists from the latest payload before a CAS attempt."""
+
+    merged = dict(existing)
+    list_keys = {"source_add_record_ids", "idempotency_keys", "evidence_history", "merged_memory_ids"}
+    for key, value in requested.items():
+        if key not in list_keys or not isinstance(value, list):
+            merged[key] = value
+            continue
+        items = [*(_as_list(existing.get(key))), *value]
+        unique: list[Any] = []
+        seen: set[str] = set()
+        for item in items:
+            identity = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            unique.append(item)
+        merged[key] = unique[-limit:] if limit > 0 else unique
+    return merged
+
+
+def _merge_reinforcement_payload(
+    existing: dict[str, Any],
+    requested: dict[str, Any],
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    """Merge the structured Episode lineage from the latest CAS payload.
+
+    Reinforcement may attach the same card to a newly selected Episode.  A
+    conflicting writer must therefore retry against the latest ``episode_ids``
+    instead of replacing the other writer's lineage with its stale patch.
+    Other payload fields retain ordinary patch semantics.
+    """
+
+    merged = dict(requested)
+    episode_ids = requested.get("episode_ids")
+    if not isinstance(episode_ids, list):
+        return merged
+
+    unique = list(dict.fromkeys([*_as_list(existing.get("episode_ids")), *episode_ids]))
+    merged["episode_ids"] = unique[-limit:] if limit > 0 else unique
+    return merged
+
+
+def _as_list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
 
 
 def _sparse_from_command(req: MemoryDbUpdateCommand) -> SparseVectorData | None:

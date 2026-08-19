@@ -90,6 +90,32 @@ def test_request_context_and_service_add_input_use_shared_contracts() -> None:
     assert add_input.metadata == {"trace": "test"}
 
 
+def test_add_input_and_record_preserve_generic_idempotency_key() -> None:
+    inp = AddPipelineInput(
+        messages=[DialogueMessage(role="user", content="Remember Qdrant.")],
+        idempotency_key="source:session:event-1",
+    )
+
+    point = to_add_record_point(
+        inp,
+        None,
+        ctx=make_context(),
+        request_submitted_at=datetime(2026, 1, 1, tzinfo=UTC),
+        task_completed_at=None,
+    )
+
+    assert inp.idempotency_key == "source:session:event-1"
+    assert point.payload["idempotency_key"] == "source:session:event-1"
+
+
+def test_add_input_rejects_oversized_idempotency_key() -> None:
+    with pytest.raises(ValueError):
+        AddPipelineInput(
+            messages=[DialogueMessage(role="user", content="Remember Qdrant.")],
+            idempotency_key="x" * 257,
+        )
+
+
 def test_service_add_input_rejects_unknown_fields() -> None:
     with pytest.raises(ValueError):
         AddPipelineInput(
@@ -118,8 +144,7 @@ def test_service_add_input_rejects_removed_add_options(field_name: str, value: o
 def test_memory_id_aliases_keep_strict_delete_update_api_compatible() -> None:
     assert DeletePipelineInput(memory_id="mem-3").id == "mem-3"
     assert DeletePipelineInput(id="mem-4").id == "mem-4"
-    with pytest.raises(ValueError):
-        DeletePipelineInput(memory_id="mem-3", hard=True)
+    assert DeletePipelineInput(memory_id="mem-3", hard=True).hard is True
     assert UpdatePipelineInput(memory_id="mem-5", content="updated").id == "mem-5"
     assert UpdatePipelineInput(id="mem-6", content="updated").id == "mem-6"
 
@@ -481,6 +506,40 @@ def test_add_record_mapper_uses_explicit_request_timestamp_before_message_timest
 
     assert point.payload["event_timestamp_ms"] == 1700000000000
     assert "timestamp" not in point.payload
+
+
+def test_add_record_mapper_preserves_complete_document_blocks() -> None:
+    ctx = make_context()
+    add_input = AddPipelineInput(
+        document_blocks=[
+            {
+                "block_id": "block-1",
+                "document_id": "document-1",
+                "locator": {"page": 7},
+                "messages": [{"text": "A complete source block."}],
+                "metadata": {"source": "import"},
+            }
+        ]
+    )
+
+    point = to_add_record_point(
+        add_input,
+        AddPipelineSyncResult(status="ok", memories=[]),
+        ctx=ctx,
+        request_submitted_at=datetime(2026, 5, 28, tzinfo=UTC),
+        task_completed_at=datetime(2026, 5, 28, 0, 0, 1, tzinfo=UTC),
+    )
+
+    assert point.payload["messages"] == []
+    assert point.payload["document_blocks"] == [
+        {
+            "block_id": "block-1",
+            "messages": [{"text": "A complete source block."}],
+            "document_id": "document-1",
+            "locator": {"page": 7},
+            "metadata": {"source": "import"},
+        }
+    ]
 
 
 def test_search_record_mapper_uses_protocol_fields_only() -> None:

@@ -497,6 +497,23 @@ class QdrantStore:
 
         await self._memory.update_payload(project_id, memory_id, payload)
 
+    async def compare_and_set_memory_payload(
+        self,
+        project_id: str,
+        memory_id: str,
+        payload: dict[str, Any],
+        *,
+        expected_payload: dict[str, Any],
+    ) -> QdrantRecord | None:
+        """Conditionally patch one memory and return its latest stored state."""
+
+        return await self._memory.compare_and_set_payload(
+            project_id,
+            memory_id,
+            payload,
+            expected_payload=expected_payload,
+        )
+
     async def patch_memory(
         self,
         project_id: str,

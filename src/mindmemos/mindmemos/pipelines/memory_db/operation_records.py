@@ -30,6 +30,28 @@ class MemoryOperationRecorder:
     def __init__(self, *, add_record_store: AddRecordStore | None = None) -> None:
         self._add_records = add_record_store or AddRecordStore()
 
+    async def get_completed_add_result(
+        self,
+        ctx: MemoryRequestContext,
+        add_record_id: str,
+    ) -> AddPipelineSyncResult | None:
+        """Return a completed sync result for an idempotent replay, if present."""
+
+        records = await self._add_records.get_by_ids(ctx.project_id, [add_record_id])
+        if not records:
+            return None
+        payload = records[0].payload
+        if payload.get("status") != "ok":
+            return None
+        memories = payload.get("memories")
+        if not isinstance(memories, list):
+            return None
+        try:
+            return AddPipelineSyncResult(status="ok", memories=memories)
+        except Exception:  # noqa: BLE001 - malformed historical audit rows are not replayable
+            logger.warning("completed add record could not be replayed", add_record_id=add_record_id, exc_info=True)
+            return None
+
     async def record_add(
         self,
         inp: AddPipelineInput,

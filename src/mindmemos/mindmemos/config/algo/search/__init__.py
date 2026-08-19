@@ -12,6 +12,7 @@ from .schema import (
     PropertySearchConfig,
     SchemaSearchConfig,
 )
+from .structured import StructuredSearchConfig
 from .vanilla import VanillaSearchConfig
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "RerankConfig",
     "SchemaSearchConfig",
     "SearchConfig",
+    "StructuredSearchConfig",
     "VanillaSearchConfig",
 ]

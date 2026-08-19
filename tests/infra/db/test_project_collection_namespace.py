@@ -75,12 +75,8 @@ async def test_project_collection_namespace_shares_same_dimension_and_separates_
     try:
         await store.ensure_schema()
         await store.upsert_memory(_memory_point("proj-a", "00000000-0000-0000-0000-000000000001", [1.0, 0.0]))
-        await store.upsert_memory(
-            _memory_point("proj-b", "00000000-0000-0000-0000-000000000002", [0.0, 1.0])
-        )
-        await store.upsert_memory(
-            _memory_point("proj-c", "00000000-0000-0000-0000-000000000003", [1.0, 0.0, 0.0])
-        )
+        await store.upsert_memory(_memory_point("proj-b", "00000000-0000-0000-0000-000000000002", [0.0, 1.0]))
+        await store.upsert_memory(_memory_point("proj-c", "00000000-0000-0000-0000-000000000003", [1.0, 0.0, 0.0]))
 
         collections = {item.name for item in (await client.get_collections()).collections}
         assert "tenant_memos" not in collections
@@ -93,6 +89,15 @@ async def test_project_collection_namespace_shares_same_dimension_and_separates_
         assert await store.project_memory_vector_size("proj-b") == 2
         assert await store.project_memory_vector_size("proj-c") == 3
         assert await store.project_memory_vector_size("proj-missing") is None
+
+        updated = await store.compare_and_set_memory_payload(
+            "proj-c",
+            "00000000-0000-0000-0000-000000000003",
+            {"reinforcement_count": 1},
+            expected_payload={"status": "active"},
+        )
+        assert updated is not None
+        assert updated.payload["reinforcement_count"] == 1
 
         a_hits = await store.search_memory_dense(
             "proj-a",
@@ -110,13 +115,9 @@ async def test_project_collection_namespace_shares_same_dimension_and_separates_
         assert [hit.point_id for hit in b_hits] == ["00000000-0000-0000-0000-000000000002"]
 
         # Knowing another project's logical ID must never bypass project ownership.
-        assert await store.get_memory(
-            "proj-b", "00000000-0000-0000-0000-000000000001"
-        ) is None
+        assert await store.get_memory("proj-b", "00000000-0000-0000-0000-000000000001") is None
         await store.delete_memory("proj-b", "00000000-0000-0000-0000-000000000001")
-        assert await store.get_memory(
-            "proj-a", "00000000-0000-0000-0000-000000000001"
-        ) is not None
+        assert await store.get_memory("proj-a", "00000000-0000-0000-0000-000000000001") is not None
     finally:
         await client.close()
 
@@ -191,17 +192,13 @@ async def test_project_collection_namespace_scopes_payload_only_records() -> Non
         search_records, _ = await store.scroll_search_records("proj-a")
         search_records_other, _ = await store.scroll_search_records("proj-b")
 
-        assert [record.payload["request_id"] for record in add_records] == [
-            "00000000-0000-0000-0000-000000000101"
-        ]
+        assert [record.payload["request_id"] for record in add_records] == ["00000000-0000-0000-0000-000000000101"]
         assert add_records_other == []
         assert [record.payload["schema_buffer_record_id"] for record in schema_records] == [
             "00000000-0000-0000-0000-000000000201"
         ]
         assert schema_records_other == []
-        assert [record.payload["request_id"] for record in search_records] == [
-            "00000000-0000-0000-0000-000000000301"
-        ]
+        assert [record.payload["request_id"] for record in search_records] == ["00000000-0000-0000-0000-000000000301"]
         assert search_records_other == []
 
         base_add_records, _ = await store.engine.scroll(
@@ -219,9 +216,7 @@ async def test_project_collection_namespace_scopes_payload_only_records() -> Non
             scroll_filter=None,
             limit=10,
         )
-        assert [record.payload["request_id"] for record in base_add_records] == [
-            "00000000-0000-0000-0000-000000000101"
-        ]
+        assert [record.payload["request_id"] for record in base_add_records] == ["00000000-0000-0000-0000-000000000101"]
         assert [record.payload["schema_buffer_record_id"] for record in base_schema_records] == [
             "00000000-0000-0000-0000-000000000201"
         ]

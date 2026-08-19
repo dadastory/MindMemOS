@@ -283,6 +283,10 @@ class FakeRecorder:
     failed_calls: list[dict] = field(default_factory=list)
     cancelled_calls: list[dict] = field(default_factory=list)
     search_calls: list[dict] = field(default_factory=list)
+    completed_by_id: dict[str, AddPipelineSyncResult] = field(default_factory=dict)
+
+    async def get_completed_add_result(self, ctx, add_record_id):
+        return self.completed_by_id.get(add_record_id)
 
     async def record_add_input(
         self,
@@ -381,6 +385,62 @@ async def test_memory_service_records_add_result_for_vanilla_add_pipeline() -> N
     assert call["status"] == "processing"
     # The same add_record_id flows into the pipeline so it can write the output back.
     assert pipeline.sync_calls[0]["add_record_id"] == call["add_record_id"]
+
+
+@pytest.mark.asyncio
+async def test_structured_add_reuses_add_record_id_for_same_idempotency_key() -> None:
+    recorder = FakeRecorder()
+    pipeline = FakeAddPipeline()
+    service = make_service(
+        add_pipeline=pipeline,
+        add_pipeline_name="structured_add",
+        operation_recorder=recorder,
+    )
+    request = add_request().model_copy(update={"idempotency_key": "source:task:generation:algorithm:event"})
+
+    first = await service.add(make_context("structured"), request)
+    add_record_id = pipeline.sync_calls[0]["add_record_id"]
+    recorder.completed_by_id[add_record_id] = first
+    second = await service.add(make_context("structured"), request)
+
+    assert second == first
+    assert len(pipeline.sync_calls) == 1
+    assert len(recorder.add_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_add_maps_top_level_task_evidence_into_memory_metadata() -> None:
+    pipeline = FakeAddPipeline()
+    service = make_service(
+        add_pipeline=pipeline,
+        add_pipeline_name="structured_add",
+        operation_recorder=FakeRecorder(),
+    )
+    request = add_request().model_copy(update={"score": 0.75, "task_id": "task-9"})
+
+    await service.add(make_context("structured"), request)
+
+    assert pipeline.sync_calls[0]["inp"].metadata == {"score": 0.75, "task_id": "task-9"}
+
+
+@pytest.mark.asyncio
+async def test_document_blocks_are_rejected_before_non_structured_pipeline_execution() -> None:
+    pipeline = FakeAddPipeline()
+    service = make_service(
+        add_pipeline=pipeline,
+        add_pipeline_name="schema_add",
+        operation_recorder=FakeRecorder(),
+    )
+    request = AddRequest(
+        user_id="u1",
+        document_blocks=[{"block_id": "block-1", "messages": [{"role": "user", "content": "one fact"}]}],
+    )
+
+    with pytest.raises(BadRequestError, match="supported only by the structured") as exc_info:
+        await service.add(make_context("schema"), request)
+
+    assert exc_info.value.code == "structured.batch_not_supported"
+    assert pipeline.sync_calls == []
 
 
 @pytest.mark.asyncio
@@ -850,6 +910,23 @@ async def test_memory_service_records_agentic_search_result() -> None:
     assert call["result"] is result
     assert call["inp"].search_pipeline == "schema"
     assert call["inp"].agentic is True
+
+
+@pytest.mark.asyncio
+async def test_memory_service_routes_structured_algorithm_to_independent_search_pipeline() -> None:
+    recorder = FakeRecorder()
+    service = make_service(
+        search_pipeline=FakeSearchPipeline("search"),
+        search_pipeline_name="search_pipeline",
+        operation_recorder=recorder,
+    )
+
+    result = await service.search(
+        make_context("structured"), SearchRequest(user_id="u1", query="bounded neighbourhood")
+    )
+
+    assert result.memories[0].memory == "search:structured:False:bounded neighbourhood"
+    assert recorder.search_calls[0]["inp"].search_pipeline == "structured"
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,7 @@ from ..registry import register
 
 @register(type="delete", name="default_delete")
 class DefaultDeletePipeline(MemoryDbPipelineMixin):
-    """Archive one memory through the project-scoped memory DB writer."""
+    """Delete one memory through the project-scoped memory DB writer."""
 
     async def delete(self, inp: DeletePipelineInput, context: MemoryRequestContext) -> DeletePipelineResult:
         """Archive a memory by id in the current project.
@@ -28,7 +28,7 @@ class DefaultDeletePipeline(MemoryDbPipelineMixin):
         Returns:
             An ok result when the memory was archived, otherwise an error result.
         """
-        command = MemoryDbDeleteCommand(memory_id=inp.id)
+        command = MemoryDbDeleteCommand(memory_id=inp.id, hard=inp.hard)
         write_result = await self.db_writer.apply_mutation_plan(
             context,
             MemoryDbMutationPlan(memory_deletes=[command]),

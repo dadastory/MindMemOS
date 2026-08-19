@@ -280,8 +280,15 @@ class Neo4jStore(Protocol):
     async def delete_memory_node(self, project_id: str, memory_id: str, *, detach: bool = True) -> None:
         """Delete one memory node."""
 
-    async def archive_memory_node(self, project_id: str, memory_id: str, *, reason: str | None = None) -> None:
-        """Mark one memory node as archived."""
+    async def archive_memory_node(
+        self,
+        project_id: str,
+        memory_id: str,
+        *,
+        reason: str | None = None,
+        status: str = "archived",
+    ) -> None:
+        """Mark one memory node with a non-active revision lifecycle status."""
 
     async def get_related_memory_ids(
         self,
@@ -315,7 +322,6 @@ class Neo4jStore(Protocol):
 
     async def close(self) -> None:
         """Close the underlying driver."""
-
 
 
 class AddRecordStore(Protocol):

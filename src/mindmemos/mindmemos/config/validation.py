@@ -536,6 +536,7 @@ def _validate_algo(cfg: Any) -> None:
         )
 
     _validate_schema_add(cfg.algo_config.add.schema)
+    _validate_structured_add(cfg.algo_config.add.structured)
     _validate_search(cfg.algo_config.search)
 
 
@@ -547,7 +548,75 @@ def _validate_schema_add(schema_add: Any) -> None:
         )
 
 
+def _validate_structured_add(structured: Any) -> None:
+    if not 0 <= structured.extraction.max_repair_attempts <= 1:
+        raise InvalidConfigError(
+            "algo_config.add.structured.extraction.max_repair_attempts",
+            support="0 or 1",
+        )
+    for path, value in (
+        ("extraction.max_entities", structured.extraction.max_entities),
+        ("extraction.max_properties_per_entity", structured.extraction.max_properties_per_entity),
+        ("extraction.max_coverage_items", structured.extraction.max_coverage_items),
+        ("dedup.candidate_top_k", structured.dedup.candidate_top_k),
+        ("dedup.max_merge_candidates", structured.dedup.max_merge_candidates),
+        ("episode.candidate_top_k", structured.episode.candidate_top_k),
+        ("embedding.batch_size", structured.embedding.batch_size),
+        ("concurrency.max_extract_concurrency", structured.concurrency.max_extract_concurrency),
+        ("concurrency.lock_stripes", structured.concurrency.lock_stripes),
+        ("concurrency.max_write_conflict_retries", structured.concurrency.max_write_conflict_retries),
+        ("history.max_source_refs", structured.history.max_source_refs),
+        ("batch.max_blocks", structured.batch.max_blocks),
+        ("batch.max_total_chars", structured.batch.max_total_chars),
+    ):
+        if value <= 0:
+            raise InvalidConfigError(f"algo_config.add.structured.{path}", support="positive integer")
+    for path, value in (
+        ("batch.max_episode_repair_attempts", structured.batch.max_episode_repair_attempts),
+        ("batch.max_consolidation_repair_attempts", structured.batch.max_consolidation_repair_attempts),
+    ):
+        if not 0 <= value <= 1:
+            raise InvalidConfigError(f"algo_config.add.structured.{path}", support="0 or 1")
+    if structured.dedup.max_merge_candidates > structured.dedup.candidate_top_k:
+        raise InvalidConfigError(
+            "algo_config.add.structured.dedup.max_merge_candidates",
+            support="<= algo_config.add.structured.dedup.candidate_top_k",
+        )
+    if structured.dedup.merge_mode not in {"llm_on_ambiguous", "create_on_ambiguous"}:
+        raise InvalidConfigError(
+            "algo_config.add.structured.dedup.merge_mode",
+            support="llm_on_ambiguous or create_on_ambiguous",
+        )
+    if structured.episode.mode != "single_pass":
+        raise InvalidConfigError(
+            "algo_config.add.structured.episode.mode",
+            support="single_pass",
+        )
+    if not 0 <= structured.episode.reuse_at_or_above <= 1:
+        raise InvalidConfigError(
+            "algo_config.add.structured.episode.reuse_at_or_above",
+            support="between 0 and 1",
+        )
+    if structured.graph.mode != "entity_property_episode":
+        raise InvalidConfigError(
+            "algo_config.add.structured.graph.mode",
+            support="entity_property_episode",
+        )
+    if not 0 <= structured.dedup.create_below < structured.dedup.same_batch_group_at_or_above <= 1:
+        raise InvalidConfigError(
+            "algo_config.add.structured.dedup",
+            support="0 <= create_below < same_batch_group_at_or_above <= 1",
+        )
+
+
 def _validate_search(search: Any) -> None:
+    structured_threshold = search.structured.min_relevance_score
+    if structured_threshold is not None and not 0 <= structured_threshold <= 1:
+        raise InvalidConfigError(
+            "algo_config.search.structured.min_relevance_score",
+            support="null or a number between 0 and 1",
+        )
+
     vanilla = search.vanilla
     if vanilla.hybrid_prefetch_min > vanilla.hybrid_prefetch_max:
         raise InvalidConfigError(

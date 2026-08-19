@@ -85,7 +85,9 @@ class FakeQdrant:
         self.memory_sparse_searches.append((project_id, vector, filter_, limit))
         return []
 
-    async def search_memory_hybrid(self, project_id, dense_vector, sparse_vector, *, filter_=None, limit=10, dense_limit=None, sparse_limit=None):
+    async def search_memory_hybrid(
+        self, project_id, dense_vector, sparse_vector, *, filter_=None, limit=10, dense_limit=None, sparse_limit=None
+    ):
         self.memory_hybrid_searches.append((project_id, dense_vector, sparse_vector, filter_, limit))
         return []
 
@@ -122,6 +124,18 @@ class FakeNeo4j:
     async def get_entity_neighbors(self, project_id, entity_id, *, direction="both", rel_type=None, limit=None):
         self.neighbor_calls.append((project_id, entity_id, direction, rel_type, limit))
         return self.neighbor_rows[:limit] if limit is not None else self.neighbor_rows
+
+
+@pytest.mark.asyncio
+async def test_get_entity_is_project_scoped_and_returns_standard_view() -> None:
+    qdrant = FakeQdrant()
+    qdrant.entity_records["ent-1"] = _entity_record("ent-1", user_id="user-1")
+    reader = MemoryDbReader(clients=SimpleNamespace(qdrant=qdrant, neo4j=FakeNeo4j()))
+
+    entity = await reader.get_entity(make_context(), "ent-1")
+
+    assert entity is not None and entity.entity_id == "ent-1"
+    assert qdrant.get_entity_calls == [("proj-1", "ent-1", False)]
 
 
 @pytest.mark.asyncio
@@ -306,6 +320,44 @@ async def test_list_memories_by_shared_entities_uses_only_mentions_traversal() -
     assert params["limit_per_entity"] == 5
     assert scopes[0].source == "shared_entity"
     assert scopes[0].memory_ids == ("mem-1", "mem-2")
+
+
+@pytest.mark.asyncio
+async def test_list_structured_related_memory_ids_combines_entity_episode_and_explicit_edges() -> None:
+    neo4j = FakeNeo4j()
+    neo4j.read_rows = [
+        {"seed_memory_id": "mem-1", "memory_id": "mem-2", "source": "shared_entity"},
+        {"seed_memory_id": "mem-1", "memory_id": "mem-3", "source": "shared_episode"},
+        {"seed_memory_id": "mem-1", "memory_id": "mem-4", "source": "entity_neighbor"},
+        {"seed_memory_id": "mem-2", "memory_id": "mem-3", "source": "shared_episode"},
+        {"seed_memory_id": "mem-1", "memory_id": "mem-1", "source": "cycle"},
+        {"seed_memory_id": "", "memory_id": "mem-5", "source": "shared_episode"},
+    ]
+    reader = MemoryDbReader(clients=SimpleNamespace(qdrant=FakeQdrant(), neo4j=neo4j))
+
+    result = await reader.list_structured_related_memory_ids(
+        make_context(),
+        ["mem-1", "mem-2", "mem-1"],
+        limit_per_memory=4,
+        max_candidates=8,
+    )
+
+    assert result == [
+        {"seed_memory_id": "mem-1", "memory_id": "mem-2", "source": "shared_entity"},
+        {"seed_memory_id": "mem-1", "memory_id": "mem-3", "source": "shared_episode"},
+        {"seed_memory_id": "mem-1", "memory_id": "mem-4", "source": "entity_neighbor"},
+        {"seed_memory_id": "mem-2", "memory_id": "mem-3", "source": "shared_episode"},
+    ]
+    query, params = neo4j.read_calls[0]
+    assert "OBSERVED_IN" in query
+    assert "shared_entity" in query
+    assert "entity_neighbor" in query
+    assert params == {
+        "project_id": "proj-1",
+        "memory_ids": ["mem-1", "mem-2"],
+        "limit_per_memory": 4,
+        "max_candidates": 8,
+    }
 
 
 @pytest.mark.asyncio

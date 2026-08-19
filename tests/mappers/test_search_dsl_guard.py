@@ -37,6 +37,7 @@ _FORBIDDEN_FIELDS = frozenset(
         "reinforcement_count",
         "parent_ids",
         "root_id",
+        "episode_ids",
     }
 )
 
@@ -202,6 +203,28 @@ def test_public_allowlist_is_subset_of_indexed_fields() -> None:
     assert DSL_FILTERABLE_MEMORY_FIELDS <= FILTERABLE_MEMORY_FIELDS
     assert DSL_DATETIME_FIELDS <= DSL_FILTERABLE_MEMORY_FIELDS
     assert DSL_TEXT_FIELDS <= DSL_FILTERABLE_MEMORY_FIELDS
+
+
+def test_internal_episode_filter_is_translatable_but_not_publicly_exposed() -> None:
+    qfilter = search_filter_to_qdrant(
+        _ctx(),
+        SearchFilter(
+            must=[
+                {
+                    "field": "episode_ids",
+                    "op": "any",
+                    "values": ["episode-current", "episode-related"],
+                }
+            ]
+        ),
+    )
+
+    assert qfilter.must is not None
+    assert qfilter.must[1].key == "episode_ids"
+    assert isinstance(qfilter.must[1].match, qmodels.MatchAny)
+    assert qfilter.must[1].match.any == ["episode-current", "episode-related"]
+    with pytest.raises(InvalidFilterError):
+        parse_search_dsl({"episode_ids": {"in": ["episode-current"]}})
 
 
 def test_removed_identity_fields_are_excluded_from_allowlist() -> None:

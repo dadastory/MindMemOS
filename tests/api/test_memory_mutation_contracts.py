@@ -83,15 +83,17 @@ async def test_delete_does_not_resolve_model_provider_context(
 
 
 def test_delete_rejects_hard_flag_over_http(monkeypatch: pytest.MonkeyPatch, auth_context: AuthContext) -> None:
-    service = MemoryService(delete_pipeline=_MissingDeletePipeline(), skill_store=object())
+    pipeline = _RecordingDeletePipeline()
+    service = MemoryService(delete_pipeline=pipeline, skill_store=object())
 
     response = _client(monkeypatch, auth_context, service).post(
         "/v1/memory/delete",
-        json={"memory_id": "missing", "hard": True},
+        json={"memory_id": "memory-1", "hard": True},
     )
 
-    assert response.status_code == 422
-    assert response.json()["code"] == "invalid_request"
+    assert response.status_code == 200
+    assert pipeline.calls[0][0].id == "memory-1"
+    assert pipeline.calls[0][0].hard is True
 
 
 def test_update_rejects_delete_status_over_http(monkeypatch: pytest.MonkeyPatch, auth_context: AuthContext) -> None:

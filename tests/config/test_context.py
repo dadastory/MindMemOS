@@ -56,6 +56,29 @@ def test_bind_config_overrides_restores_previous_context() -> None:
         reset_config()
 
 
+def test_bind_config_overrides_accepts_fractional_provider_timeout() -> None:
+    try:
+        init_config(config_path="config/mindmemos/dev.example.yaml")
+
+        with bind_config_overrides(
+            project_config={
+                "chat_model_router": {
+                    "endpoints": [
+                        {
+                            "model": "openai/test-model",
+                            "api_key": "sk-test",
+                            "api_base": "https://example.test/v1",
+                            "timeout": 120.5,
+                        }
+                    ]
+                }
+            }
+        ):
+            assert get_config().chat_model_router.endpoints[0].timeout == 120.5
+    finally:
+        reset_config()
+
+
 def test_bind_config_overrides_rejects_invalid_project_config() -> None:
     try:
         init_config(config_path="config/mindmemos/dev.example.yaml")

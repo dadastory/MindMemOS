@@ -93,6 +93,8 @@ MEMORY_PAYLOAD_INDEX_SCHEMA: tuple[PayloadIndexSpec, ...] = (
     PayloadIndexSpec(field_name="session_id", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="agent_id", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="request_id", field_schema=qmodels.PayloadSchemaType.UUID),
+    PayloadIndexSpec(field_name="content_fingerprint", field_schema=qmodels.PayloadSchemaType.KEYWORD),
+    PayloadIndexSpec(field_name="idempotency_key", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="mem_type", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="mem_extract_type", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="mem_extract_version", field_schema=qmodels.PayloadSchemaType.KEYWORD),
@@ -103,18 +105,20 @@ MEMORY_PAYLOAD_INDEX_SCHEMA: tuple[PayloadIndexSpec, ...] = (
     PayloadIndexSpec(field_name="update_at", field_schema=qmodels.PayloadSchemaType.DATETIME),
     PayloadIndexSpec(field_name="status_changed_at", field_schema=qmodels.PayloadSchemaType.DATETIME),
     PayloadIndexSpec(field_name="reinforcement_count", field_schema=qmodels.PayloadSchemaType.INTEGER),
+    PayloadIndexSpec(field_name="last_seen_at", field_schema=qmodels.PayloadSchemaType.DATETIME),
     PayloadIndexSpec(field_name="parent_ids", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="root_id", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="property_name", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="entity_id", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="entity_type", field_schema=qmodels.PayloadSchemaType.KEYWORD),
+    PayloadIndexSpec(field_name="episode_ids", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="content", field_schema=qmodels.PayloadSchemaType.TEXT),
 )
 
-# Fields a caller-supplied SearchFilter may reference. Derived from the indexed
-# memory payload so we never filter on an unindexed (slow) or isolation-critical
-# field. ``project_id`` is intentionally excluded: it is force-injected by the
-# mapper and must not be overridable by callers.
+# Fields an internal ``SearchFilter`` may reference. The public request DSL has
+# its own deliberately narrower allowlist in ``typing.memory``. ``project_id``
+# remains excluded because the mapper force-injects it, while ``episode_ids`` is
+# required by structured-add's Episode-scoped history recall.
 FILTERABLE_MEMORY_FIELDS: frozenset[str] = frozenset(
     spec.field_name for spec in MEMORY_PAYLOAD_INDEX_SCHEMA if spec.field_name != "project_id"
 )
@@ -187,6 +191,7 @@ ADD_RECORD_PAYLOAD_INDEX_SCHEMA: tuple[PayloadIndexSpec, ...] = (
     PayloadIndexSpec(field_name="consolidation_run_id", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="mode", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="task_id", field_schema=qmodels.PayloadSchemaType.KEYWORD),
+    PayloadIndexSpec(field_name="idempotency_key", field_schema=qmodels.PayloadSchemaType.KEYWORD),
     PayloadIndexSpec(field_name="score", field_schema=qmodels.PayloadSchemaType.FLOAT),
     PayloadIndexSpec(field_name="feedback_processed", field_schema=qmodels.PayloadSchemaType.BOOL),
     PayloadIndexSpec(field_name="request_submitted_at", field_schema=qmodels.PayloadSchemaType.DATETIME),

@@ -82,6 +82,57 @@ async def test_memory_add_worker_uses_algorithm_bound_add_pipeline_sync_entry(mo
 
 
 @pytest.mark.asyncio
+async def test_memory_add_worker_preserves_structured_algorithm_and_idempotency_key(monkeypatch) -> None:
+    captured = SimpleNamespace(name=None, context=None, inp=None)
+
+    class ConfiguredPipeline:
+        async def add_sync(self, inp, context, *, add_record_id=None):
+            captured.context = context
+            captured.inp = inp
+            return SimpleNamespace(memories=[])
+
+    def create(*, type, name):
+        captured.name = name
+        return ConfiguredPipeline()
+
+    monkeypatch.setattr(memory_add, "create_pipeline", create)
+    await memory_add.handle_memory_add(
+        make_message(
+            {
+                "context": {
+                    "request_id": "req-structured",
+                    "account_id": "acc-1",
+                    "project_id": "proj-1",
+                    "api_key_uuid": "key-1",
+                    "memory_algorithm": "structured",
+                    "user_id": "user-1",
+                    "session_id": "task-1",
+                },
+                "input": {
+                    "document_blocks": [
+                        {
+                            "block_id": "block-1",
+                            "document_id": "doc-1",
+                            "locator": {"page": 3},
+                            "messages": [{"text": "candidate"}],
+                        }
+                    ],
+                    "mode": "async",
+                    "idempotency_key": "opaque-event-1",
+                },
+            }
+        )
+    )
+
+    assert captured.name == "structured_add"
+    assert captured.context.memory_algorithm == "structured"
+    assert captured.inp.mode == "sync"
+    assert captured.inp.idempotency_key == "opaque-event-1"
+    assert captured.inp.document_blocks[0].block_id == "block-1"
+    assert captured.inp.document_blocks[0].locator == {"page": 3}
+
+
+@pytest.mark.asyncio
 async def test_memory_add_worker_marks_processing_and_forwards_add_record_id(monkeypatch) -> None:
     recorder = FakeRecorder()
     forwarded: list = []

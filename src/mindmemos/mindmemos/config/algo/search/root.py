@@ -8,6 +8,7 @@ from .agentic import AgenticConfig
 from .default_search import DefaultSearchConfig
 from .rerank import RerankConfig
 from .schema import SchemaSearchConfig
+from .structured import StructuredSearchConfig
 from .vanilla import VanillaSearchConfig
 
 
@@ -29,6 +30,9 @@ class SearchConfig:
 
     schema_search: SchemaSearchConfig = field(default_factory=SchemaSearchConfig)
     """Schema-aware search pipeline configuration."""
+
+    structured: StructuredSearchConfig = field(default_factory=StructuredSearchConfig)
+    """Lightweight Structured search quality controls."""
 
     agentic: AgenticConfig = field(default_factory=AgenticConfig)
     """Agentic search pipeline configuration."""

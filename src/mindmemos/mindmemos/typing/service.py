@@ -18,7 +18,7 @@ from .memory import (
 )
 
 ServiceResultStatus = Literal["ok", "error", "queued"]
-SearchPipelineStrategy = Literal["default", "vanilla", "schema"]
+SearchPipelineStrategy = Literal["default", "vanilla", "schema", "structured"]
 
 
 class AddStreamCancelled(Exception):
@@ -77,6 +77,9 @@ class MemoryAddEventItem(BaseModel):
 
     graph_edge_count: int = 0
     """Number of graph edges produced by this memory operation."""
+
+    source_block_ids: list[str] = Field(default_factory=list)
+    """Document block IDs whose facts contributed to this operation."""
 
     @model_validator(mode="after")
     def _fill_memory_type(self) -> "MemoryAddEventItem":
@@ -140,11 +143,32 @@ class MemorySearchItem(BaseModel):
     """Schema property name for management views."""
 
 
+class DocumentBlock(BaseModel):
+    """One unordered, independently traceable source block for structured Add."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    block_id: str = Field(min_length=1, max_length=256)
+    messages: list[DialogueMessage | UrlMessage | FileMessage | TextMessage] = Field(min_length=1)
+    document_id: str | None = Field(default=None, min_length=1, max_length=256)
+    event_timestamp_ms: int | None = Field(
+        default=None,
+        ge=0,
+        validation_alias=AliasChoices("event_timestamp_ms", "event_timestamp", "timestamp"),
+        serialization_alias="event_timestamp_ms",
+    )
+    locator: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AddPipelineInput(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     messages: list[DialogueMessage | UrlMessage | FileMessage | TextMessage] = Field(default_factory=list)
     """Input messages; dialogue, URL, file, and plain text messages may be mixed."""
+
+    document_blocks: list[DocumentBlock] = Field(default_factory=list, max_length=128)
+    """Unordered document blocks accepted only by structured Add."""
 
     event_timestamp_ms: int = Field(
         default_factory=_utc_millis,
@@ -166,8 +190,22 @@ class AddPipelineInput(BaseModel):
     metadata: dict = Field(default_factory=dict)
     """Business extension metadata."""
 
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=256)
+    """Opaque caller key used by algorithms that support idempotent ingestion."""
+
     prompt_language: Literal["EN", "ZH"] | None = None
     """Optional request-level prompt language for extraction."""
+
+    @model_validator(mode="after")
+    def _validate_source_shape(self) -> AddPipelineInput:
+        # Public AddRequest requires one source. Keep the historical internal
+        # empty-input DTO valid for vanilla builder/no-op tests and workers.
+        if self.messages and self.document_blocks:
+            raise ValueError("messages and document_blocks are mutually exclusive")
+        block_ids = [block.block_id for block in self.document_blocks]
+        if len(block_ids) != len(set(block_ids)):
+            raise ValueError("document block IDs must be unique")
+        return self
 
     @property
     def timestamp(self) -> int:
@@ -338,6 +376,10 @@ class DeletePipelineInput(BaseModel):
 
     id: str = Field(alias="memory_id")
     """Memory ID."""
+
+    hard: bool = False
+    """Physically delete the memory instead of archiving it."""
+
 
 class DeletePipelineResult(BaseModel):
     status: ServiceResultStatus

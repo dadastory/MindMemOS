@@ -67,9 +67,7 @@ class MemoryRepository(CollectionRepository):
         """Search via dense semantic vector."""
 
         collection = self.collection_for_vector_size(len(vector))
-        if self._cfg.project_collection_namespace_enabled and not await self._engine.collection_exists(
-            collection
-        ):
+        if self._cfg.project_collection_namespace_enabled and not await self._engine.collection_exists(collection):
             return []
         return await self._engine.query(
             collection,
@@ -121,9 +119,7 @@ class MemoryRepository(CollectionRepository):
         """Run Qdrant-side RRF over dense and sparse prefetches."""
 
         collection = self.collection_for_vector_size(len(dense_vector))
-        if self._cfg.project_collection_namespace_enabled and not await self._engine.collection_exists(
-            collection
-        ):
+        if self._cfg.project_collection_namespace_enabled and not await self._engine.collection_exists(collection):
             return []
         scoped_filter = self._engine.project_filter(project_id, filter_=filter_)
         return await self._engine.query(
@@ -157,6 +153,32 @@ class MemoryRepository(CollectionRepository):
         collection = await self._collection_holding_project(project_id)
         if collection is not None:
             await self._engine.set_payload(collection, memory_id, payload)
+
+    async def compare_and_set_payload(
+        self,
+        project_id: str,
+        memory_id: str,
+        payload: dict[str, Any],
+        *,
+        expected_payload: dict[str, Any],
+    ) -> QdrantRecord | None:
+        """Patch one memory only when its current payload matches expected scalar values."""
+
+        collection = await self._collection_holding_project(project_id)
+        if collection is None:
+            return None
+        conditions: list[Any] = [qmodels.HasIdCondition(has_id=[memory_id])]
+        conditions.extend(
+            qmodels.FieldCondition(key=key, match=qmodels.MatchValue(value=value))
+            for key, value in expected_payload.items()
+        )
+        selector = self._engine.project_filter(project_id, conditions=conditions)
+        await self._engine.compare_and_set_payload(
+            collection,
+            selector=selector,
+            payload=payload,
+        )
+        return await self.get(project_id, memory_id)
 
     async def patch(
         self,

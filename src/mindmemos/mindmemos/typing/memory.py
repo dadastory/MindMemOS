@@ -36,7 +36,7 @@ ConsistencyMode = Literal["fast", "strong"]
 GraphNodeKind = Literal["Memory", "Entity", "Source"]
 GraphDirection = Literal["out", "in", "both"]
 GraphNeighborSource = Literal["shared_entity", "direct_memory_relation"]
-MemoryStatus = Literal["active", "archived", "delete"]
+MemoryStatus = Literal["active", "archived", "superseded", "delete"]
 MemoryRelationType = Literal["RELATES_TO", "RELATED_TO"]
 MemoryType = Literal["profile", "fact", "experience", "episodic", "tool_trace", "skill_candidate", "file_knowledge"]
 SearchMode = Literal["semantic", "bm25", "rrf", "graph", "hybrid"]
@@ -432,6 +432,8 @@ class MemoryWrite(BaseModel):
     session_id: str | None = None
     agent_id: str | None = None
     request_id: str | None = None
+    content_fingerprint: str | None = None
+    idempotency_key: str | None = None
     content: str
     mem_type: MemoryType = "fact"
     mem_extract_type: str = "vanilla"
@@ -441,6 +443,7 @@ class MemoryWrite(BaseModel):
     validate_to: datetime | None = None
     status: MemoryStatus = "active"
     reinforcement_count: int = 0
+    last_seen_at: datetime | None = None
     created_at: datetime
     update_at: datetime | None = None
     status_changed_at: datetime | None = None
@@ -449,6 +452,7 @@ class MemoryWrite(BaseModel):
     property_name: str | None = None
     entity_id: str | None = None
     entity_type: str | None = None
+    episode_ids: list[str] = Field(default_factory=list)
 
 
 class EntityWrite(BaseModel):
@@ -600,11 +604,16 @@ class MemoryView(BaseModel):
     session_id: str | None = None
     agent_id: str | None = None
     request_id: str | None = None
+    content_fingerprint: str | None = None
+    idempotency_key: str | None = None
+    reinforcement_count: int = 0
+    last_seen_at: datetime | None = None
     parent_ids: list[str] = Field(default_factory=list)
     root_id: list[str] = Field(default_factory=list)
     property_name: str | None = None
     entity_id: str | None = None
     entity_type: str | None = None
+    episode_ids: list[str] = Field(default_factory=list)
     validate_from: datetime | None = None
     validate_to: datetime | None = None
     created_at: datetime | None = None

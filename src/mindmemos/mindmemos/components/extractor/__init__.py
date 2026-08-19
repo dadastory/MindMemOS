@@ -2,6 +2,7 @@
 
 from .protocols import AddRecallStrategy, MemoryExtractor
 from .schema import SchemaAddExtractor, SchemaAddPlanner, SchemaExtractionNormalizer
+from .structured import StructuredExtractionError, StructuredExtractor
 from .vanilla import (
     AddSafetyGate,
     CandidateDeduplicator,
@@ -31,4 +32,6 @@ __all__ = [
     "SchemaAddExtractor",
     "SchemaAddPlanner",
     "SchemaExtractionNormalizer",
+    "StructuredExtractionError",
+    "StructuredExtractor",
 ]

@@ -52,6 +52,7 @@ def load_builtin_pipelines() -> None:
     for module_name in (
         ".add.default",
         ".add.schema",
+        ".add.structured.pipeline",
         ".add.vanilla",
         ".delete.default",
         ".dreaming.default",

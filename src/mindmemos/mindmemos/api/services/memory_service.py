@@ -6,10 +6,11 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from ...config import get_config
-from ...errors import MemoryNotFoundError, ResourceNotFoundError
+from ...errors import BadRequestError, MemoryNotFoundError, ResourceNotFoundError
 from ...logging import get_logger, traced
 from ...pipelines import create_pipeline
 from ...pipelines.add import AddPipeline
+from ...pipelines.add.structured.identity import structured_add_record_id
 from ...pipelines.delete import DefaultDeletePipeline, DeletePipeline
 from ...pipelines.dreaming import DreamingPipeline
 from ...pipelines.feedback import FeedbackPipeline
@@ -65,6 +66,35 @@ logger = get_logger(__name__)
 
 PipelineKind = Literal["add", "search", "get", "delete", "update", "feedback", "dreaming"]
 SEARCH_PIPELINE_NAME = "search_pipeline"
+
+
+def _add_record_id(ctx, payload) -> str:
+    if ctx.memory_algorithm == "structured" and payload.idempotency_key:
+        return structured_add_record_id(ctx, payload.idempotency_key)
+    return str(uuid4())
+
+
+def _with_structured_evidence_metadata(ctx, request: AddRequest, payload):
+    """Preserve generic request evidence in structured-memory metadata."""
+
+    if ctx.memory_algorithm != "structured":
+        return payload
+    metadata = dict(payload.metadata)
+    if request.score is not None:
+        metadata["score"] = request.score
+    if request.task_id is not None:
+        metadata["task_id"] = request.task_id
+    return payload.model_copy(update={"metadata": metadata})
+
+
+def _validate_add_source_for_algorithm(ctx, payload) -> None:
+    """Keep the additive block contract isolated to the structured pipeline."""
+
+    if payload.document_blocks and ctx.memory_algorithm != "structured":
+        raise BadRequestError(
+            "document_blocks are supported only by the structured memory algorithm",
+            code="structured.batch_not_supported",
+        )
 
 
 class MemoryService:
@@ -171,7 +201,28 @@ class MemoryService:
             raise NotImplementedError("add pipeline implementation is not wired yet")
         ctx = to_memory_request_context(auth, request, require_user_id=True)
         payload = to_add_pipeline_input(request)
-        add_record_id = str(uuid4())
+        _validate_add_source_for_algorithm(ctx, payload)
+        payload = _with_structured_evidence_metadata(ctx, request, payload)
+        add_record_id = _add_record_id(ctx, payload)
+        if ctx.memory_algorithm == "structured" and payload.mode == "sync" and payload.idempotency_key:
+            get_completed = getattr(self._recorder, "get_completed_add_result", None)
+            if get_completed is not None:
+                try:
+                    completed = await get_completed(ctx, add_record_id)
+                except Exception:  # noqa: BLE001 - audit lookup must not block a valid write
+                    logger.warning(
+                        "structured idempotency lookup failed",
+                        add_record_id=add_record_id,
+                        exc_info=True,
+                    )
+                else:
+                    if completed is not None:
+                        logger.info(
+                            "structured idempotency replay",
+                            add_record_id=add_record_id,
+                            memory_count=len(completed.memories),
+                        )
+                        return completed
         request_submitted_at = utcnow()
         config_ctx = await self._provider_config_context(ctx)
         with config_ctx:
@@ -202,6 +253,8 @@ class MemoryService:
             raise NotImplementedError("add pipeline implementation is not wired yet")
         ctx = to_memory_request_context(auth, request, require_user_id=True)
         payload = to_add_pipeline_input(request)
+        _validate_add_source_for_algorithm(ctx, payload)
+        payload = _with_structured_evidence_metadata(ctx, request, payload)
         if payload.mode != "sync":
             yield {
                 "event": "error",
@@ -210,7 +263,7 @@ class MemoryService:
             }
             return
 
-        add_record_id = str(uuid4())
+        add_record_id = _add_record_id(ctx, payload)
         request_submitted_at = utcnow()
         config_ctx = await self._provider_config_context(ctx)
         with config_ctx:

@@ -210,15 +210,22 @@ class Neo4jStore:
             detach=detach,
         )
 
-    async def archive_memory_node(self, project_id: str, memory_id: str, *, reason: str | None = None) -> None:
-        """Mark one ``Memory`` node as archived without removing graph edges."""
+    async def archive_memory_node(
+        self,
+        project_id: str,
+        memory_id: str,
+        *,
+        reason: str | None = None,
+        status: str = "archived",
+    ) -> None:
+        """Mark one ``Memory`` node non-active without removing graph edges."""
 
         properties: dict[str, Any] = {
-            "status": "archived",
+            "status": status,
             "status_changed_at": datetime.now(UTC),
         }
         if reason:
-            properties["delete_reason"] = reason
+            properties["delete_reason" if status == "archived" else "lifecycle_reason"] = reason
         await self._upsert_node(
             label="Memory",
             key={"project_id": project_id, "memory_id": memory_id},

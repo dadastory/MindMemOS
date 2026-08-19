@@ -224,6 +224,12 @@ class MemoryDbReader:
         records = await self._clients.qdrant.get_memories(ctx.project_id, memory_ids)
         return [to_memory_view_from_record(record) for record in records]
 
+    @traced("memory_db.get_entity")
+    async def get_entity(self, ctx: MemoryRequestContext, entity_id: str) -> EntityView | None:
+        """Read one entity in the request project without hydrating its memories."""
+
+        record = await self._clients.qdrant.get_entity(ctx.project_id, entity_id)
+        return to_entity_view_from_record(record) if record else None
 
     @traced("memory_db.list_memories_by_shared_entities")
     async def list_memories_by_shared_entities(
@@ -290,6 +296,102 @@ class MemoryDbReader:
                 )
             )
         return scopes
+
+    @traced("memory_db.list_structured_related_memory_ids")
+    async def list_structured_related_memory_ids(
+        self,
+        ctx: MemoryRequestContext,
+        memory_ids: list[str],
+        *,
+        limit_per_memory: int = 4,
+        max_candidates: int = 100,
+    ) -> list[dict[str, str]]:
+        """Return bounded Structured neighbors through entity and Episode edges."""
+
+        seed_ids = [memory_id for memory_id in dict.fromkeys(memory_ids) if memory_id]
+        per_seed = max(0, int(limit_per_memory))
+        total_limit = max(0, int(max_candidates))
+        if not seed_ids or per_seed <= 0 or total_limit <= 0:
+            return []
+        query = """
+        UNWIND $memory_ids AS seed_memory_id
+        MATCH (seed:Memory {project_id: $project_id, memory_id: seed_memory_id})
+        CALL (seed) {
+            MATCH (seed)-[:MENTIONS]->(seed_entity:Entity {project_id: $project_id})
+                  <-[:MENTIONS]-(related:Memory {project_id: $project_id})
+            RETURN related, 0 AS source_order
+            UNION
+            MATCH (seed)-[:MENTIONS]->(seed_entity:Entity {project_id: $project_id})
+                  -[:OBSERVED_IN]->(episode:Entity {project_id: $project_id, entity_type: 'episodes'})
+            MATCH (related_entity:Entity {project_id: $project_id})-[:OBSERVED_IN]->(episode)
+            MATCH (related:Memory {project_id: $project_id})-[:MENTIONS]->(related_entity)
+            RETURN related, 1 AS source_order
+            UNION
+            MATCH (seed)-[:MENTIONS]->(seed_entity:Entity {project_id: $project_id})
+                  -[edge]-(related_entity:Entity {project_id: $project_id})
+            WHERE type(edge) <> 'OBSERVED_IN'
+              AND related_entity.entity_type <> 'episodes'
+              AND related_entity.entity_id <> seed_entity.entity_id
+            MATCH (related:Memory {project_id: $project_id})-[:MENTIONS]->(related_entity)
+            RETURN related, 2 AS source_order
+        }
+        WITH seed_memory_id, related, source_order
+        WHERE related.memory_id <> seed_memory_id
+          AND coalesce(related.status, 'active') = 'active'
+        WITH seed_memory_id, related, min(source_order) AS source_order
+        ORDER BY source_order, related.memory_id
+        WITH seed_memory_id,
+             collect({
+                 memory_id: related.memory_id,
+                 source_order: source_order,
+                 source: CASE source_order
+                     WHEN 0 THEN 'shared_entity'
+                     WHEN 1 THEN 'shared_episode'
+                     ELSE 'entity_neighbor'
+                 END
+             })[0..$limit_per_memory] AS neighbors
+        UNWIND neighbors AS neighbor
+        RETURN seed_memory_id AS seed_memory_id,
+               neighbor.memory_id AS memory_id,
+               neighbor.source AS source
+        ORDER BY seed_memory_id, neighbor.source_order, neighbor.memory_id
+        LIMIT $max_candidates
+        """
+        rows = await self._clients.neo4j.run_read(
+            query,
+            project_id=ctx.project_id,
+            memory_ids=seed_ids,
+            limit_per_memory=per_seed,
+            max_candidates=total_limit,
+        )
+        result: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        allowed_sources = {"shared_entity", "shared_episode", "entity_neighbor"}
+        seed_set = set(seed_ids)
+        for row in rows:
+            seed_memory_id = str(row.get("seed_memory_id") or "")
+            memory_id = str(row.get("memory_id") or "")
+            source = str(row.get("source") or "")
+            key = (seed_memory_id, memory_id)
+            if (
+                seed_memory_id not in seed_set
+                or not memory_id
+                or memory_id == seed_memory_id
+                or source not in allowed_sources
+                or key in seen
+            ):
+                continue
+            seen.add(key)
+            result.append(
+                {
+                    "seed_memory_id": seed_memory_id,
+                    "memory_id": memory_id,
+                    "source": source,
+                }
+            )
+            if len(result) >= total_limit:
+                break
+        return result
 
     @traced("memory_db.list_direct_related_memories")
     async def list_direct_related_memories(
@@ -579,6 +681,7 @@ class MemoryDbReader:
         req: MemoryDbSearchQuery,
         *,
         query_vector: list[float],
+        score_threshold: float | None = None,
     ) -> MemoryDbSearchResult:
         """Search memories by dense vector."""
 
@@ -587,6 +690,7 @@ class MemoryDbReader:
             query_vector,
             filter_=search_filter_to_qdrant(ctx, _active_memory_filter(req.filters)),
             limit=req.top_k,
+            score_threshold=score_threshold,
         )
         result = to_search_result(req.query, hits)
         return result

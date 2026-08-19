@@ -14,9 +14,10 @@ from .agentic.wrapper import AgenticSearchWrapper
 from .base import SearchEngine
 from .default import DefaultSearchEngine
 from .schema import SchemaSearchEngine
+from .structured import StructuredSearchEngine
 from .vanilla import VanillaSearchEngine
 
-_DEFAULT_ENGINE_NAMES = frozenset({"default", "vanilla", "schema"})
+_DEFAULT_ENGINE_NAMES = frozenset({"default", "vanilla", "schema", "structured"})
 
 
 @register(type="search", name="search_pipeline")
@@ -78,8 +79,10 @@ class SearchPipelineImpl(MemoryDbPipelineMixin):
             engine = DefaultSearchEngine(**common)
         elif name == "vanilla":
             engine = VanillaSearchEngine(**common)
-        else:
+        elif name == "schema":
             engine = SchemaSearchEngine(**common)
+        else:
+            engine = StructuredSearchEngine(**common)
         self._engines[name] = engine
         return engine
 
