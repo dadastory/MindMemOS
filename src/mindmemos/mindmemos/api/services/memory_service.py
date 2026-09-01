@@ -90,9 +90,9 @@ def _with_structured_evidence_metadata(ctx, request: AddRequest, payload):
 def _validate_add_source_for_algorithm(ctx, payload) -> None:
     """Keep the additive block contract isolated to the structured pipeline."""
 
-    if payload.document_blocks and ctx.memory_algorithm != "structured":
+    if (payload.document_blocks or payload.structured_items) and ctx.memory_algorithm != "structured":
         raise BadRequestError(
-            "document_blocks are supported only by the structured memory algorithm",
+            "document_blocks and structured_items are supported only by the structured memory algorithm",
             code="structured.batch_not_supported",
         )
 

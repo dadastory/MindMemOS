@@ -69,6 +69,12 @@ class MemoryAddEventItem(BaseModel):
     memory_type: MemoryType | str | None = None
     """Standard displayed memory type."""
 
+    entity_type: str | None = None
+    """Structured schema entity type, when produced by Structured Add."""
+
+    property_name: str | None = None
+    """Structured schema property name, when produced by Structured Add."""
+
     confidence: float | None = None
     """Extraction confidence."""
 
@@ -143,6 +149,18 @@ class MemorySearchItem(BaseModel):
     """Schema property name for management views."""
 
 
+class SourceArtifactInput(BaseModel):
+    """One caller-supplied immutable artifact attached to a structured source block."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: str = Field(min_length=1, max_length=512)
+    type: Literal["code", "formula", "table", "example", "quote", "metric"]
+    content: str = Field(min_length=1, max_length=200_000)
+    language: str | None = Field(default=None, max_length=64)
+    source_hash: str | None = Field(default=None, min_length=64, max_length=64)
+
+
 class DocumentBlock(BaseModel):
     """One unordered, independently traceable source block for structured Add."""
 
@@ -150,6 +168,8 @@ class DocumentBlock(BaseModel):
 
     block_id: str = Field(min_length=1, max_length=256)
     messages: list[DialogueMessage | UrlMessage | FileMessage | TextMessage] = Field(min_length=1)
+    source_artifacts: list[SourceArtifactInput] = Field(default_factory=list, max_length=100)
+    """Complete immutable evidence stored with extracted cards but kept outside model content."""
     document_id: str | None = Field(default=None, min_length=1, max_length=256)
     event_timestamp_ms: int | None = Field(
         default=None,
@@ -161,6 +181,29 @@ class DocumentBlock(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class StructuredPropertyInput(BaseModel):
+    """One already-extracted property supplied to the structured Add pipeline."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    property_name: str = Field(min_length=1, max_length=256)
+    value: Any
+    time: str | None = Field(default=None, max_length=128)
+
+
+class StructuredEntityInput(BaseModel):
+    """One validated, pre-structured entity that bypasses LLM extraction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str = Field(min_length=1, max_length=512)
+    entity_name: str = Field(min_length=1, max_length=512)
+    entity_type: str = Field(min_length=1, max_length=256)
+    description: str = Field(default="", max_length=4000)
+    properties: list[StructuredPropertyInput] = Field(min_length=1, max_length=32)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AddPipelineInput(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -169,6 +212,9 @@ class AddPipelineInput(BaseModel):
 
     document_blocks: list[DocumentBlock] = Field(default_factory=list, max_length=128)
     """Unordered document blocks accepted only by structured Add."""
+
+    structured_items: list[StructuredEntityInput] = Field(default_factory=list, max_length=128)
+    """Already-extracted entities accepted only by structured Add."""
 
     event_timestamp_ms: int = Field(
         default_factory=_utc_millis,
@@ -200,11 +246,15 @@ class AddPipelineInput(BaseModel):
     def _validate_source_shape(self) -> AddPipelineInput:
         # Public AddRequest requires one source. Keep the historical internal
         # empty-input DTO valid for vanilla builder/no-op tests and workers.
-        if self.messages and self.document_blocks:
-            raise ValueError("messages and document_blocks are mutually exclusive")
+        source_count = sum(bool(source) for source in (self.messages, self.document_blocks, self.structured_items))
+        if source_count > 1:
+            raise ValueError("messages, document_blocks, and structured_items are mutually exclusive")
         block_ids = [block.block_id for block in self.document_blocks]
         if len(block_ids) != len(set(block_ids)):
             raise ValueError("document block IDs must be unique")
+        source_ids = [item.source_id for item in self.structured_items]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("structured item source IDs must be unique")
         return self
 
     @property

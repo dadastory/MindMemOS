@@ -46,6 +46,10 @@ class _Extractor:
             raise self.value
         return self.value
 
+    def validate_prestructured(self, entities, *, event_time):
+        self.last_prestructured = {"entities": entities, "event_time": event_time}
+        return {"entities": entities, "edges": []}
+
 
 class _Embed:
     def __init__(self):
@@ -197,6 +201,28 @@ def _batch_input() -> AddPipelineInput:
     )
 
 
+def _structured_import_input() -> AddPipelineInput:
+    return AddPipelineInput(
+        structured_items=[
+            {
+                "source_id": "task-memory-1",
+                "entity_name": "Adaptive mutation strategy",
+                "entity_type": "AlgorithmExperience",
+                "description": "A reusable strategy",
+                "properties": [
+                    {
+                        "property_name": "finding",
+                        "value": "Use adaptive mutation",
+                        "time": "2026-08-03",
+                    }
+                ],
+                "metadata": {"source_scope": "task"},
+            }
+        ],
+        idempotency_key="promote-task-memory-1",
+    )
+
+
 def _extraction(value="Use adaptive mutation"):
     return {
         "entities": [
@@ -304,6 +330,49 @@ async def test_single_add_forwards_caller_selected_schema_properties_to_extracto
     await pipeline.add_sync(inp, _ctx(), add_record_id="add-property-constraint")
 
     assert pipeline._explicit_extractor.last_kwargs["allowed_property_names"] == {"finding"}
+
+
+@pytest.mark.asyncio
+async def test_prestructured_import_skips_llm_extraction_and_runs_structured_persistence():
+    pipeline, writer, _ = _pipeline(extraction=_extraction())
+
+    result = await pipeline.add_sync(
+        _structured_import_input(),
+        _ctx(),
+        add_record_id="add-imported-card",
+    )
+
+    assert pipeline._explicit_extractor.calls == 0
+    imported = pipeline._explicit_extractor.last_prestructured["entities"][0]
+    assert imported["name"].startswith("import:")
+    assert imported["_display_name"] == "Adaptive mutation strategy"
+    assert result.memories[0].operation == "add"
+    assert result.memories[0].source_block_ids == ["task-memory-1"]
+    assert result.memories[0].entity_type == "AlgorithmExperience"
+    assert result.memories[0].property_name == "finding"
+    assert writer.plans[0].memory_writes[0].memory.property_name == "finding"
+    assert writer.plans[0].memory_writes[0].memory.metadata["source_documents"][0]["metadata"] == {
+        "source_scope": "task"
+    }
+
+
+@pytest.mark.asyncio
+async def test_prestructured_import_keeps_duplicate_display_names_isolated_by_source():
+    inp = _structured_import_input()
+    duplicate = inp.structured_items[0].model_copy(deep=True)
+    duplicate.source_id = "task-memory-2"
+    duplicate.properties[0].value = "Use a different adaptive schedule"
+    inp.structured_items.append(duplicate)
+    pipeline, _, _ = _pipeline(extraction=_extraction())
+
+    await pipeline.add_sync(inp, _ctx(), add_record_id="add-duplicate-titles")
+
+    entities = pipeline._explicit_extractor.last_prestructured["entities"]
+    assert [entity["_display_name"] for entity in entities] == [
+        "Adaptive mutation strategy",
+        "Adaptive mutation strategy",
+    ]
+    assert len({entity["name"] for entity in entities}) == 2
 
 
 @pytest.mark.asyncio
@@ -722,22 +791,19 @@ async def test_contextual_reinforce_converges_equivalent_active_candidates_and_p
         "duplicate-source",
         "add-converge",
     ]
-    assert updates[canonical.memory_id].metadata_patch["merged_memory_ids"] == [duplicate.memory_id]
+    assert "merged_memory_ids" not in updates[canonical.memory_id].metadata_patch
     assert updates[canonical.memory_id].payload_patch["episode_ids"] == ["episode-earlier"]
-    assert updates[duplicate.memory_id].status == "archived"
-    assert updates[duplicate.memory_id].metadata_patch["merged_into"] == canonical.memory_id
+    assert duplicate.memory_id not in updates
+    assert [(command.memory_id, command.hard) for command in plan.memory_deletes] == [
+        (duplicate.memory_id, True)
+    ]
     assert distinct.memory_id not in updates
-    assert any(
-        command.relationship.rel_type == "DERIVED_FROM"
-        and command.relationship.source.node_id == canonical.memory_id
-        and command.relationship.target.node_id == duplicate.memory_id
-        for command in plan.relationship_writes
-    )
+    assert all(command.relationship.rel_type != "DERIVED_FROM" for command in plan.relationship_writes)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("action", "old_status"), [("update", "archived"), ("supersede", "superseded")])
-async def test_revision_action_converges_all_selected_equivalents_into_one_revision(action, old_status):
+@pytest.mark.parametrize("action", ["update", "supersede"])
+async def test_revision_action_converges_all_selected_equivalents_into_one_revision(action):
     from mindmemos.pipelines.add.structured.planner import StructuredDecision
 
     canonical = _memory("memory-canonical", "Raise mutation after stagnation.")
@@ -767,18 +833,15 @@ async def test_revision_action_converges_all_selected_equivalents_into_one_revis
 
     plan = writer.plans[0]
     revision = plan.memory_writes[0].memory
-    assert revision.parent_ids == [canonical.memory_id, duplicate.memory_id]
-    assert revision.metadata["merged_memory_ids"] == [canonical.memory_id, duplicate.memory_id]
+    assert revision.parent_ids == []
+    assert "merged_memory_ids" not in revision.metadata
     assert revision.metadata["source_add_record_ids"] == ["earlier", "duplicate-source", "add-revision-cluster"]
-    updates = {command.memory_id: command for command in plan.memory_updates}
-    assert updates[canonical.memory_id].status == old_status
-    assert updates[duplicate.memory_id].status == old_status
-    derived_targets = {
-        command.relationship.target.node_id
-        for command in plan.relationship_writes
-        if command.relationship.rel_type == "DERIVED_FROM"
+    assert plan.memory_updates == []
+    assert {(command.memory_id, command.hard) for command in plan.memory_deletes} == {
+        (canonical.memory_id, True),
+        (duplicate.memory_id, True),
     }
-    assert derived_targets == {canonical.memory_id, duplicate.memory_id}
+    assert all(command.relationship.rel_type != "DERIVED_FROM" for command in plan.relationship_writes)
 
 
 @pytest.mark.asyncio
@@ -818,12 +881,11 @@ async def test_new_episode_compares_cards_from_recalled_episode_before_creating_
     assert result.memories[0].operation == "update"
     plan = writer.plans[0]
     revision = plan.memory_writes[0].memory
-    assert revision.parent_ids == [historical.memory_id]
+    assert revision.parent_ids == []
     assert previous_episode.entity_id in revision.episode_ids
-    assert (
-        next(command for command in plan.memory_updates if command.memory_id == historical.memory_id).status
-        == "archived"
-    )
+    assert [(command.memory_id, command.hard) for command in plan.memory_deletes] == [
+        (historical.memory_id, True)
+    ]
 
 
 @pytest.mark.asyncio
@@ -891,8 +953,8 @@ async def test_exact_content_requires_contextual_entity_resolution_before_reinfo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("action", "old_status"), [("update", "archived"), ("supersede", "superseded")])
-async def test_revision_actions_preserve_old_memory_and_lineage(action, old_status):
+@pytest.mark.parametrize("action", ["update", "supersede"])
+async def test_revision_actions_hard_delete_replaced_memory_without_lineage(action):
     existing = _memory()
     hit = MemoryDbSearchHit(memory_id=existing.memory_id, score=0.9, memory=existing)
     reader = _Reader(memories={existing.memory_id: existing}, hits=[hit])
@@ -914,14 +976,19 @@ async def test_revision_actions_preserve_old_memory_and_lineage(action, old_stat
     plan = writer.plans[0]
     assert len(plan.memory_writes) == 1
     assert plan.memory_writes[0].memory.memory_id != existing.memory_id
-    assert plan.memory_writes[0].memory.parent_ids == [existing.memory_id]
+    assert plan.memory_writes[0].memory.parent_ids == []
+    assert plan.memory_writes[0].memory.root_id == []
+    assert "merged_memory_ids" not in plan.memory_writes[0].memory.metadata
     assert plan.memory_writes[0].vector.semantic_vector
     assert [item["metadata"]["score"] for item in plan.memory_writes[0].memory.metadata["evidence_history"]] == [
         0.5,
         0.9,
     ]
-    assert plan.memory_updates[0].status == old_status
-    assert plan.relationship_writes[-1].relationship.rel_type == "DERIVED_FROM"
+    assert plan.memory_updates == []
+    assert [(command.memory_id, command.hard) for command in plan.memory_deletes] == [
+        (existing.memory_id, True)
+    ]
+    assert all(command.relationship.rel_type != "DERIVED_FROM" for command in plan.relationship_writes)
     assert merge.calls == 1
 
 
@@ -1352,6 +1419,66 @@ async def test_document_batch_attaches_block_provenance_to_exact_source_artifact
         "block-b:artifact-1",
     }
     assert all(artifact["content"] == code for artifact in artifacts)
+
+
+@pytest.mark.asyncio
+async def test_document_batch_accepts_full_source_artifacts_outside_model_content():
+    full_code = "def solve():\n" + "    improve()\n" * 200 + "    return best\n"
+    source_artifact = {
+        "artifact_id": "code-1:solver.py",
+        "type": "code",
+        "language": "python",
+        "content": full_code,
+    }
+
+    class _IndependentArtifactExtractor(_Extractor):
+        async def extract(self, **kwargs):
+            self.calls += 1
+            self.last_kwargs = kwargs
+            return _extraction(
+                {
+                    "description": "Complete solver implementation.",
+                    "content": ["The solver repeatedly improves the incumbent."],
+                    "artifacts": kwargs["source_artifacts"],
+                }
+            )
+
+    extractor = _IndependentArtifactExtractor(_extraction())
+    writer = _Writer()
+    pipeline = StructuredAddPipeline(
+        structured_add_config=StructuredAddConfig(),
+        extractor=extractor,
+        merge_decider=_BatchMerge(),
+        episode_allocator=_BatchAllocator(),
+        llm_client=None,
+        embed_client=_Embed(),
+        text_preprocessor=_Preprocessor(),
+        sparse_encoder=_Sparse(),
+        db_reader=_Reader(),
+        db_writer=writer,
+        recorder=_Recorder(),
+        consistency="strong",
+    )
+    inp = AddPipelineInput(
+        document_blocks=[
+            DocumentBlock(
+                block_id="block-full-source",
+                messages=[DialogueMessage(role="user", content="Short analysis summary only.")],
+                source_artifacts=[source_artifact],
+            )
+        ],
+        idempotency_key="batch-full-source",
+    )
+
+    await pipeline.add_sync(inp, _ctx(), add_record_id="batch-full-source")
+
+    assert extractor.last_kwargs["content"] == "user: Short analysis summary only."
+    assert extractor.last_kwargs["source_artifacts"] == [source_artifact]
+    stored = writer.plans[0].memory_writes[0].memory.metadata["structured_content"]["artifacts"][0]
+    assert stored["content"] == full_code
+    assert stored["artifact_id"] == "block-full-source:code-1:solver.py"
+    assert stored["source_block_id"] == "block-full-source"
+    assert full_code not in writer.plans[0].memory_writes[0].memory.content
 
 
 @pytest.mark.asyncio

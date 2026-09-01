@@ -34,6 +34,7 @@ from ..typing import (
     MemoryAddEventItem,
     MemorySearchItem,
     SkillContext,
+    StructuredEntityInput,
     TextMessage,
     UrlMessage,
 )
@@ -111,6 +112,9 @@ class AddRequest(ActorIdentityRequest):
     document_blocks: list[DocumentBlock] = Field(default_factory=list, max_length=128)
     """Unordered blocks accepted by projects using the structured algorithm."""
 
+    structured_items: list[StructuredEntityInput] = Field(default_factory=list, max_length=128)
+    """Already-extracted entities accepted by projects using the structured algorithm."""
+
     mode: AddMode = Field(default="sync")
     """Add mode: sync or async."""
 
@@ -156,13 +160,17 @@ class AddRequest(ActorIdentityRequest):
 
     @model_validator(mode="after")
     def _validate_source_shape(self):
-        if bool(self.messages) == bool(self.document_blocks):
-            raise ValueError("provide exactly one of messages or document_blocks")
+        sources = (self.messages, self.document_blocks, self.structured_items)
+        if sum(bool(source) for source in sources) != 1:
+            raise ValueError("provide exactly one of messages, document_blocks, or structured_items")
         block_ids = [block.block_id for block in self.document_blocks]
         if len(block_ids) != len(set(block_ids)):
             raise ValueError("document block IDs must be unique")
         for block in self.document_blocks:
             validate_messages_have_content(block.messages)
+        source_ids = [item.source_id for item in self.structured_items]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("structured item source IDs must be unique")
         return self
 
 

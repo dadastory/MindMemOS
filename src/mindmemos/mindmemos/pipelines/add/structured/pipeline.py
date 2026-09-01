@@ -12,7 +12,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from ....components.extractor.schema._schema_utils import (
     edge_relationships,
@@ -45,6 +45,7 @@ from ....typing import (
     GraphNodeRef,
     GraphRelationship,
     MemoryAddEventItem,
+    MemoryDbMemoryDeleteCommand,
     MemoryDbMemoryUpdateCommand,
     MemoryDbMutationPlan,
     MemoryDbWritePlan,
@@ -76,6 +77,7 @@ from .identity import (
 )
 from .planner import (
     StructuredDecision,
+    StructuredHistoryScope,
     StructuredMergeDecider,
     StructuredMergeRequest,
     StructuredProperty,
@@ -110,6 +112,17 @@ def _default_consistency() -> Consistency:
     except ConfigNotInitializedError:
         return "fast"
     return value if value in {"fast", "strong"} else "fast"
+
+
+def _history_scope(inp: AddPipelineInput) -> StructuredHistoryScope:
+    raw_scope = (inp.metadata or {}).get("structured_history_scope", "episode")
+    scope = str(raw_scope).strip().lower()
+    if scope not in {"episode", "session"}:
+        raise BadRequestError(
+            "structured_history_scope must be 'episode' or 'session'",
+            code="structured.invalid_history_scope",
+        )
+    return cast(StructuredHistoryScope, scope)
 
 
 async def _report(progress: ProgressReporter | None, stage: str, message: str, percent: int) -> None:
@@ -466,8 +479,10 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
         extractor, merge, embed = self._runtime(context)
         content = _input_content(inp)
         config = self._config()
+        history_scope = _history_scope(inp)
+        prestructured = bool(inp.structured_items)
         episode_candidates: list[StructuredEpisodeCandidate] = []
-        if hasattr(self.db_reader, "search_entities_dense"):
+        if not prestructured and hasattr(self.db_reader, "search_entities_dense"):
             try:
                 episode_candidates = await recall_structured_episode_candidates(
                     self.db_reader,
@@ -479,16 +494,53 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                 )
             except Exception:  # noqa: BLE001 - missing Episode history must not block lightweight Add
                 logger.warning("structured_episode_recall_failed", request_id=context.request_id, exc_info=True)
-        await _report(progress, "llm_extracting", "Extracting structured memory.", 25)
-        async with self._model_limit(self._config()):
-            extracted = await extractor.extract(
-                content=content,
+        if prestructured:
+            await _report(progress, "validating", "Validating pre-structured memories.", 20)
+            sources: dict[str, Any] = {}
+            raw_entities: list[dict[str, Any]] = []
+            for item in inp.structured_items:
+                entity_key = f"import:{hashlib.sha256(item.source_id.encode()).hexdigest()}"
+                sources[entity_key] = item
+                raw_entities.append(
+                    {
+                        "name": entity_key,
+                        "_display_name": item.entity_name,
+                        "entity_type": item.entity_type,
+                        "description": item.description,
+                        "properties": [
+                            {
+                                "property_name": prop.property_name,
+                                "value": prop.value,
+                                "time": prop.time,
+                            }
+                            for prop in item.properties
+                        ],
+                    }
+                )
+            extracted = extractor.validate_prestructured(
+                raw_entities,
                 event_time=inp.event_timestamp_utc.isoformat(),
-                prompt_language=inp.prompt_language,
-                episode_candidates=episode_candidates,
-                allowed_property_names=_structured_allowed_property_names(inp.metadata),
             )
-        await _check_cancel(cancel_check, "llm_extracting")
+            for entity in extracted.get("entities", []):
+                source = sources[entity["name"]]
+                entity["_display_name"] = source.entity_name
+                entity["_source_block_id"] = source.source_id
+                entity["_source_document"] = {
+                    "source_id": source.source_id,
+                    "metadata": _bounded_scalar_metadata(source.metadata),
+                }
+            await _check_cancel(cancel_check, "validating")
+        else:
+            await _report(progress, "llm_extracting", "Extracting structured memory.", 25)
+            async with self._model_limit(self._config()):
+                extracted = await extractor.extract(
+                    content=content,
+                    event_time=inp.event_timestamp_utc.isoformat(),
+                    prompt_language=inp.prompt_language,
+                    episode_candidates=episode_candidates,
+                    allowed_property_names=_structured_allowed_property_names(inp.metadata),
+                )
+            await _check_cancel(cancel_check, "llm_extracting")
         episode_explicit = isinstance(extracted.get("episode"), dict)
         episode_decision = structured_episode_decision_from_result(
             extracted,
@@ -550,6 +602,7 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                 properties,
                 episode_ids=comparison_episode_ids or None,
                 top_k=config.dedup.candidate_top_k,
+                history_scope=history_scope,
             )
             if config.dedup.vector_enabled and properties
             else [[] for _ in properties]
@@ -609,6 +662,7 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                     properties,
                     episode_ids=comparison_episode_ids or None,
                     top_k=config.dedup.candidate_top_k,
+                    history_scope=history_scope,
                 )
                 if config.dedup.vector_enabled and properties
                 else [[] for _ in properties]
@@ -678,16 +732,25 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
 
         started_at = time.perf_counter()
         config = self._config()
+        history_scope = _history_scope(inp)
         if len(inp.document_blocks) > config.batch.max_blocks:
             raise BadRequestError(
                 f"document block count exceeds max_blocks={config.batch.max_blocks}",
                 code="structured.batch_too_large",
             )
         block_contents = {block.block_id: _messages_content(block.messages) for block in inp.document_blocks}
-        total_chars = sum(len(content) for content in block_contents.values())
+        block_source_artifacts = {
+            block.block_id: [artifact.model_dump(exclude_none=True) for artifact in block.source_artifacts]
+            for block in inp.document_blocks
+        }
+        total_chars = sum(len(content) for content in block_contents.values()) + sum(
+            len(str(artifact.get("content") or ""))
+            for artifacts in block_source_artifacts.values()
+            for artifact in artifacts
+        )
         if total_chars > config.batch.max_total_chars:
             raise BadRequestError(
-                f"document block content exceeds max_total_chars={config.batch.max_total_chars}",
+                f"document block content and source artifacts exceed max_total_chars={config.batch.max_total_chars}",
                 code="structured.batch_too_large",
             )
 
@@ -708,6 +771,7 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                         allowed_property_names=_structured_allowed_property_names(
                             block.metadata if "structured_allowed_property_names" in block.metadata else inp.metadata
                         ),
+                        source_artifacts=block_source_artifacts[block.block_id],
                     )
             except ApiError as exc:
                 exc.details = {**(exc.details or {}), "block_id": block.block_id}
@@ -893,6 +957,7 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                 properties,
                 episode_ids=None,
                 top_k=config.dedup.candidate_top_k,
+                history_scope=history_scope,
             )
             if config.dedup.vector_enabled and properties
             else [[] for _ in properties]
@@ -970,6 +1035,7 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                     properties,
                     episode_ids=None,
                     top_k=config.dedup.candidate_top_k,
+                    history_scope=history_scope,
                 )
                 if config.dedup.vector_enabled and properties
                 else [[] for _ in properties]
@@ -1119,6 +1185,7 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
         preprocessor, sparse_encoder = self._text_components()
         flat = MemoryDbWritePlan()
         updates: list[MemoryDbMemoryUpdateCommand] = []
+        deletes: list[MemoryDbMemoryDeleteCommand] = []
         events: list[MemoryAddEventItem] = []
         get_entity = getattr(self.db_reader, "get_entity", None)
         episode_specs = dict(batch_episodes or {})
@@ -1284,20 +1351,12 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                     )
                 )
                 for equivalent in equivalent_targets:
-                    updates.append(
-                        _retire_equivalent_command(
-                            equivalent,
-                            canonical_memory_id=target.memory_id,
-                            action="reinforce",
+                    deletes.append(
+                        MemoryDbMemoryDeleteCommand(
+                            memory_id=equivalent.memory_id,
+                            hard=True,
+                            reason="structured_equivalent_merge",
                             consistency=self._consistency(),
-                        )
-                    )
-                    flat.relationships.append(
-                        _memory_derivation_relationship(
-                            context.project_id,
-                            target.memory_id,
-                            equivalent.memory_id,
-                            action="reinforce",
                         )
                     )
                 if item_episode_id and target.entity_id:
@@ -1310,8 +1369,10 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                         content=target.content,
                         memory_id=target.memory_id,
                         mem_type=target.mem_type,
-                        related_memory_ids=[memory.memory_id for memory in equivalent_targets],
-                        graph_edge_count=len(equivalent_targets),
+                        entity_type=item.entity_type,
+                        property_name=item.property_name,
+                        related_memory_ids=[],
+                        graph_edge_count=0,
                         source_block_ids=item.source_block_ids,
                     )
                 )
@@ -1355,6 +1416,8 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                             content=existing_base.content,
                             memory_id=existing_base.memory_id,
                             mem_type=existing_base.mem_type,
+                            entity_type=item.entity_type,
+                            property_name=item.property_name,
                             source_block_ids=item.source_block_ids,
                         )
                     )
@@ -1382,6 +1445,8 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                                 content=existing_reintroduction.content,
                                 memory_id=existing_reintroduction.memory_id,
                                 mem_type=existing_reintroduction.mem_type,
+                                entity_type=item.entity_type,
+                                property_name=item.property_name,
                                 source_block_ids=item.source_block_ids,
                             )
                         )
@@ -1403,32 +1468,15 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
             )
             if is_structured_content(content):
                 metadata[STRUCTURED_CONTENT_METADATA_KEY] = content
-            parent_ids: list[str] = []
-            root_ids: list[str] = []
             if target is not None and decision.action in {"update", "supersede"}:
                 predecessors = [target, *equivalent_targets]
-                parent_ids = list(dict.fromkeys(memory.memory_id for memory in predecessors))
-                root_ids = list(
-                    dict.fromkeys(
-                        root_id for memory in predecessors for root_id in (memory.root_id or [memory.memory_id])
-                    )
-                )
-                metadata["revision_action"] = decision.action
-                metadata["previous_memory_id"] = target.memory_id
-                if decision.action == "supersede":
-                    metadata["supersedes"] = target.memory_id
-                    metadata["superseded_memory_ids"] = parent_ids
                 for predecessor in predecessors:
-                    updates.append(
-                        MemoryDbMemoryUpdateCommand(
+                    deletes.append(
+                        MemoryDbMemoryDeleteCommand(
                             memory_id=predecessor.memory_id,
-                            status="archived" if decision.action == "update" else "superseded",
+                            hard=True,
                             reason=f"structured_{decision.action}",
                             consistency=self._consistency(),
-                            metadata_patch={
-                                "replaced_by": memory_id,
-                                "replacement_action": decision.action,
-                            },
                         )
                     )
 
@@ -1453,7 +1501,7 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                 request_id=context.request_id,
                 content_fingerprint=fingerprint,
                 idempotency_key=inp.idempotency_key,
-                content=structured_content_text(content),
+                content=structured_content_semantic_text(content),
                 mem_type=mem_type,
                 mem_extract_type="structured",
                 mem_extract_version=STRUCTURED_VERSION,
@@ -1461,8 +1509,8 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
                 validate_from=_parse_time(item.property_time),
                 created_at=now,
                 last_seen_at=now,
-                parent_ids=parent_ids,
-                root_id=root_ids,
+                parent_ids=[],
+                root_id=[],
                 property_name=item.property_name,
                 entity_id=item.entity_id,
                 entity_type=item.entity_type,
@@ -1482,24 +1530,16 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
             flat.relationships.extend(property_relationships(context.project_id, item.entity_id, memory))
             if item_episode_id:
                 flat.relationships.append(_episode_relationship(context.project_id, item.entity_id, item_episode_id))
-            if target is not None and decision.action in {"update", "supersede"}:
-                flat.relationships.extend(
-                    _memory_derivation_relationship(
-                        context.project_id,
-                        memory_id,
-                        predecessor_id,
-                        action=decision.action,
-                    )
-                    for predecessor_id in parent_ids
-                )
             events.append(
                 MemoryAddEventItem(
                     operation="update" if decision.action in {"update", "supersede"} else "add",
                     content=memory.content,
                     memory_id=memory_id,
                     mem_type=mem_type,
-                    related_memory_ids=parent_ids,
-                    graph_edge_count=2 + len(parent_ids),
+                    entity_type=item.entity_type,
+                    property_name=item.property_name,
+                    related_memory_ids=[],
+                    graph_edge_count=2,
                     source_block_ids=item.source_block_ids,
                 )
             )
@@ -1507,6 +1547,7 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
         flat.relationships.extend(edge_relationships(extracted.get("edges", []), entity_by_name, context.project_id))
         mutation = MemoryDbMutationPlan.from_write_plan(flat)
         mutation.memory_updates.extend(updates)
+        mutation.memory_deletes.extend(deletes)
         return mutation, events
 
     async def _resolve_property_entity_ids(
@@ -1658,6 +1699,17 @@ class StructuredAddPipeline(MemoryDbPipelineMixin, AddPipeline):
 
 
 def _input_content(inp: AddPipelineInput) -> str:
+    if inp.structured_items:
+        return "\n\n".join(
+            "\n".join(
+                [
+                    item.entity_name,
+                    item.description,
+                    *[structured_content_text(prop.value) for prop in item.properties],
+                ]
+            )
+            for item in inp.structured_items
+        )
     if inp.document_blocks:
         return "\n\n".join(_messages_content(block.messages) for block in inp.document_blocks)
     return _messages_content(inp.messages)
@@ -1770,8 +1822,6 @@ def _new_metadata(
             ],
             max_source_refs,
         )
-    if predecessors:
-        metadata["merged_memory_ids"] = _bounded_values([memory.memory_id for memory in predecessors], max_source_refs)
     if inp.idempotency_key:
         metadata["last_idempotency_key"] = inp.idempotency_key
     return metadata
@@ -1896,10 +1946,6 @@ def _reinforce_command(
             add_record_id,
             config.history.max_source_refs,
         ),
-        "merged_memory_ids": _bounded_values(
-            [*metadata.get("merged_memory_ids", []), *(memory.memory_id for memory in equivalents)],
-            config.history.max_source_refs,
-        ),
         "last_evidence": _bounded_scalar_metadata(inp.metadata),
         "last_reinforcement_event_id": event_token,
     }
@@ -1952,41 +1998,6 @@ def _reinforce_command(
     )
 
 
-def _retire_equivalent_command(
-    memory: MemoryView,
-    *,
-    canonical_memory_id: str,
-    action: str,
-    consistency: Consistency,
-) -> MemoryDbMemoryUpdateCommand:
-    return MemoryDbMemoryUpdateCommand(
-        memory_id=memory.memory_id,
-        status="archived",
-        reason="structured_equivalent_merge",
-        consistency=consistency,
-        metadata_patch={
-            "merged_into": canonical_memory_id,
-            "replacement_action": action,
-        },
-    )
-
-
-def _memory_derivation_relationship(
-    project_id: str,
-    canonical_memory_id: str,
-    historical_memory_id: str,
-    *,
-    action: str,
-) -> GraphRelationship:
-    return GraphRelationship(
-        source=GraphNodeRef(kind="Memory", project_id=project_id, node_id=canonical_memory_id),
-        target=GraphNodeRef(kind="Memory", project_id=project_id, node_id=historical_memory_id),
-        rel_type="DERIVED_FROM",
-        project_id=project_id,
-        metadata={"action": action},
-    )
-
-
 def _episode_relationship(project_id: str, entity_id: str, episode_id: str) -> GraphRelationship:
     return GraphRelationship(
         source=GraphNodeRef(kind="Entity", project_id=project_id, node_id=entity_id),
@@ -2019,6 +2030,8 @@ def _idempotent_history_event(memory: MemoryView) -> MemoryAddEventItem:
         content=memory.content,
         memory_id=memory.memory_id,
         mem_type=memory.mem_type,
+        entity_type=memory.entity_type,
+        property_name=memory.property_name,
     )
 
 

@@ -30,6 +30,7 @@ from ....typing import (
 
 logger = get_logger(__name__)
 StructuredAction = Literal["create", "reinforce", "update", "supersede"]
+StructuredHistoryScope = Literal["episode", "session"]
 
 
 def _deterministic_relation_content(incoming: Any, historical: Any, relation: str) -> Any | None:
@@ -403,8 +404,9 @@ async def recall_structured_candidates(
     *,
     episode_ids: set[str] | None = None,
     top_k: int,
+    history_scope: StructuredHistoryScope = "episode",
 ) -> list[list[MemoryDbSearchHit]]:
-    """Recall candidates concurrently by typed property inside relevant Episodes."""
+    """Recall typed candidates within the configured history boundary."""
 
     async def recall(item: StructuredProperty) -> list[MemoryDbSearchHit]:
         base_conditions = [
@@ -419,9 +421,13 @@ async def recall_structured_candidates(
         if context.agent_id:
             base_conditions.append(FieldCondition(field="agent_id", op="match", value=context.agent_id))
 
-        item_episode_ids = set(item.comparison_episode_ids) or set(episode_ids or [])
         searches = []
-        if item_episode_ids:
+        if history_scope == "session":
+            # Fixed-schema callers may intentionally group every observation
+            # into a new Episode. In that case semantic merge still needs the
+            # active typed history from the same task/session.
+            if not context.session_id:
+                return []
             searches.append(
                 _search_structured_property(
                     db_reader,
@@ -429,16 +435,31 @@ async def recall_structured_candidates(
                     item,
                     conditions=[
                         *base_conditions,
-                        FieldCondition(field="episode_ids", op="any", values=sorted(item_episode_ids)),
+                        FieldCondition(field="session_id", op="match", value=context.session_id),
                     ],
                     top_k=top_k,
                 )
             )
+        else:
+            item_episode_ids = set(item.comparison_episode_ids) or set(episode_ids or [])
+            if item_episode_ids:
+                searches.append(
+                    _search_structured_property(
+                        db_reader,
+                        context,
+                        item,
+                        conditions=[
+                            *base_conditions,
+                            FieldCondition(field="episode_ids", op="any", values=sorted(item_episode_ids)),
+                        ],
+                        top_k=top_k,
+                    )
+                )
             # Memories written by the pre-structured Schema pipeline do not
             # carry ``episode_ids``. Keep same-session typed memories eligible
             # during migration without weakening the Episode-scoped primary
             # recall path.
-            if context.session_id:
+            if item_episode_ids and context.session_id:
                 searches.append(
                     _search_structured_property(
                         db_reader,
@@ -452,16 +473,16 @@ async def recall_structured_candidates(
                         top_k=top_k,
                     )
                 )
-        else:
-            searches.append(
-                _search_structured_property(
-                    db_reader,
-                    context,
-                    item,
-                    conditions=base_conditions,
-                    top_k=top_k,
+            elif not item_episode_ids:
+                searches.append(
+                    _search_structured_property(
+                        db_reader,
+                        context,
+                        item,
+                        conditions=base_conditions,
+                        top_k=top_k,
+                    )
                 )
-            )
 
         groups = await asyncio.gather(*searches)
         by_id: dict[str, MemoryDbSearchHit] = {}

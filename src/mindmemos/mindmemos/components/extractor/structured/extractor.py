@@ -12,7 +12,7 @@ from ....config import StructuredExtractionConfig
 from ....errors import ApiError
 from ....llm import LLMClient
 from ....logging import get_logger
-from ....structured_content import normalize_structured_content
+from ....structured_content import normalize_structured_artifact, normalize_structured_content
 from ..schema._schema_utils import parse_json_object, strip_for_generation
 from .episode import StructuredEpisodeCandidate
 from .evidence import inventory_source_artifacts
@@ -26,6 +26,44 @@ _EVIDENCE_FORM_INVENTORY = (
     "constraints and exceptions; worked examples; and ordinary factual claims. Do not require or invent an evidence "
     "form that is absent from Candidate content. "
 )
+
+
+def _merge_source_artifacts(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize exact artifacts while keeping duplicate source bytes only once."""
+
+    result: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_hashes: set[str] = set()
+    for value in values:
+        artifact = normalize_structured_artifact(value)
+        artifact_id = artifact["artifact_id"]
+        if artifact_id in seen_ids:
+            raise ValueError(f"duplicate structured source artifact ID: {artifact_id}")
+        seen_ids.add(artifact_id)
+        if artifact["source_hash"] in seen_hashes:
+            continue
+        seen_hashes.add(artifact["source_hash"])
+        result.append(artifact)
+    return result
+
+
+def _source_artifact_prompt_inventory(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Describe attached evidence to the model without copying large immutable bodies."""
+
+    return [
+        {
+            key: value
+            for key, value in {
+                "artifact_id": artifact.get("artifact_id"),
+                "type": artifact.get("type"),
+                "language": artifact.get("language"),
+                "source_hash": artifact.get("source_hash"),
+                "content_length": len(str(artifact.get("content") or "")),
+            }.items()
+            if value not in {None, ""}
+        }
+        for artifact in values
+    ]
 
 _EVIDENCE_DETAIL_RULES = (
     "Preserve material detail conditionally for each present form: keep ordering and conditions for procedures; exact "
@@ -79,10 +117,13 @@ class StructuredExtractor:
         prompt_language: str | None,
         episode_candidates: list[StructuredEpisodeCandidate] | None = None,
         allowed_property_names: set[str] | None = None,
+        source_artifacts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Return a normalized structured result or fail before persistence."""
 
-        source_artifacts = inventory_source_artifacts(content)
+        source_artifacts = _merge_source_artifacts(
+            [*(source_artifacts or []), *inventory_source_artifacts(content)]
+        )
         schema = self.schema_context
         selection_is_final = False
         extract_relationships = True
@@ -178,6 +219,23 @@ class StructuredExtractor:
             original=normalized,
             missing_evidence=missing_evidence,
             source_artifacts=source_artifacts,
+        )
+
+    def validate_prestructured(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        event_time: str,
+    ) -> dict[str, Any]:
+        """Validate caller-supplied structured entities without invoking an LLM."""
+
+        return self._validate_and_normalize(
+            {"entities": entities, "edges": []},
+            event_time=event_time,
+            schema=self.schema_context,
+            episode_candidates=None,
+            allow_relation_only=False,
+            source_artifacts=None,
         )
 
     async def _select_schema(
@@ -438,6 +496,7 @@ def _schema_with_allowed_properties(
             "Structured extraction property constraint is not present in the project Schema.",
             details={"unknown_property_names": sorted(unknown)},
         )
+
     filtered: list[dict[str, Any]] = []
     for entity in schema:
         item = copy.deepcopy(entity)
@@ -903,7 +962,8 @@ def _extraction_prompt(
         f"{json.dumps(prompt_schema, ensure_ascii=False)}\n"
         f"Selected property value requirements: "
         f"{json.dumps(_schema_value_requirements(schema), ensure_ascii=False, sort_keys=True)}\n"
-        f"Source artifact inventory: {json.dumps(source_artifacts, ensure_ascii=False, sort_keys=True)}\n"
+        "Source artifact inventory (immutable bodies are attached separately and must be referenced by ID): "
+        f"{json.dumps(_source_artifact_prompt_inventory(source_artifacts), ensure_ascii=False, sort_keys=True)}\n"
         f"Candidate content:\n{content}"
     )
 

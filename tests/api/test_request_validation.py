@@ -2,6 +2,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from mindmemos.api.app import register_exception_handlers
+from mindmemos.api.mappers import to_add_pipeline_input
 from mindmemos.api.schemas import AddRequest
 from mindmemos.errors import BadRequestError
 from pydantic import ValidationError
@@ -53,3 +54,37 @@ def test_document_blocks_are_mutually_exclusive_and_require_unique_ids() -> None
         AddRequest(user_id="u1", messages=[{"role": "user", "content": "fact"}], document_blocks=[block])
     with pytest.raises(ValidationError, match="unique"):
         AddRequest(user_id="u1", document_blocks=[block, block])
+
+
+def test_structured_items_are_a_third_add_source_and_map_to_the_pipeline() -> None:
+    item = {
+        "source_id": "task-memory-1",
+        "entity_name": "Bounded 2-opt",
+        "entity_type": "llm4ad_memory_card",
+        "description": "A reusable local-search strategy.",
+        "properties": [
+            {
+                "property_name": "good_algorithm",
+                "value": {
+                    "description": "Bounded 2-opt improves clustered tours.",
+                    "content": ["Bound the 2-opt neighborhood on large instances."],
+                },
+            }
+        ],
+        "metadata": {"source_scope": "task"},
+    }
+
+    request = AddRequest(user_id="u1", structured_items=[item])
+    payload = to_add_pipeline_input(request)
+
+    assert request.messages == []
+    assert request.document_blocks == []
+    assert payload.structured_items[0].source_id == "task-memory-1"
+    assert payload.structured_items[0].properties[0].property_name == "good_algorithm"
+
+    with pytest.raises(ValidationError, match="exactly one"):
+        AddRequest(
+            user_id="u1",
+            messages=[{"role": "user", "content": "fact"}],
+            structured_items=[item],
+        )

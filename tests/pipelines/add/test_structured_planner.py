@@ -592,6 +592,41 @@ async def test_batch_candidate_recall_uses_each_consolidated_property_episode_fe
     } == {("episode-0",), ("episode-1",)}
 
 
+@pytest.mark.asyncio
+async def test_candidate_recall_can_use_session_history_across_episode_boundaries():
+    reader = ConcurrentReader()
+    item = StructuredProperty(
+        entity_name="Repeated task lesson",
+        entity_type="llm4ad_memory_card",
+        property_name="error_reflection",
+        content="Avoid the same underperforming repair strategy.",
+        property_time="2026-08-21",
+        fingerprint="new",
+        memory_id="new-memory",
+        entity_id="new-entity",
+        vector=[1.0],
+        episode_id="episode-new",
+        comparison_episode_ids=["episode-new"],
+    )
+
+    await recall_structured_candidates(
+        reader,
+        context(),
+        [item],
+        episode_ids=None,
+        top_k=5,
+        history_scope="session",
+    )
+
+    assert len(reader.requests) == 1
+    request = reader.requests[0][1]
+    assert any(
+        condition.field == "session_id" and condition.op == "match" and condition.value == "task-1"
+        for condition in request.filters.must
+    )
+    assert all(condition.field != "episode_ids" for condition in request.filters.must)
+
+
 class LegacySchemaReader:
     def __init__(self):
         self.requests = []

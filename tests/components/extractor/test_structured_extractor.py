@@ -234,6 +234,58 @@ async def test_structured_extractor_materializes_code_refs_from_source_without_m
 
 
 @pytest.mark.asyncio
+async def test_structured_extractor_keeps_independent_artifact_body_out_of_model_prompt():
+    full_code = "def solve():\n" + "    improve()\n" * 200 + "    return 'SECRET_FULL_TAIL'\n"
+    llm = QueueLLM(
+        valid_payload(
+            entities=[
+                {
+                    "name": "Solver implementation",
+                    "entity_type": "llm4ad_memory_card",
+                    "description": "Complete source evidence.",
+                    "properties": [
+                        {
+                            "property_name": "good_algorithm",
+                            "value": {
+                                "description": "The solver improves an incumbent.",
+                                "content": ["The solver repeatedly applies its improvement step."],
+                                "artifact_refs": ["code-1:solver.py"],
+                            },
+                        }
+                    ],
+                }
+            ]
+        )
+    )
+    extractor = StructuredExtractor(
+        llm_client=llm,
+        entity_manager=FakeLlm4adEntityManager(),
+        config=StructuredExtractionConfig(max_repair_attempts=0),
+    )
+
+    result = await extractor.extract(
+        content="A short analysis preview for the attached solver.",
+        event_time="2026-08-24",
+        prompt_language="EN",
+        source_artifacts=[
+            {
+                "artifact_id": "code-1:solver.py",
+                "type": "code",
+                "language": "python",
+                "content": full_code,
+            }
+        ],
+    )
+
+    prompt = llm.calls[0]["messages"][0]["content"]
+    assert '"artifact_id": "code-1:solver.py"' in prompt
+    assert '"content_length":' in prompt
+    assert "SECRET_FULL_TAIL" not in prompt
+    stored = result["entities"][0]["properties"][0]["value"]["artifacts"][0]
+    assert stored["content"] == full_code
+
+
+@pytest.mark.asyncio
 async def test_structured_extractor_repairs_a_card_that_omits_an_inventoried_source_artifact():
     source = "```cpp\nShellInsert(L, dlta[k]);\n```"
     omitted = valid_payload(
