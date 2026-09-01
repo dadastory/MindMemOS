@@ -107,7 +107,16 @@ class StructuredExtractor:
     def schema_context(self) -> list[dict[str, Any]]:
         """Return the request-scoped generation Schema used by contextual merge."""
 
-        return strip_for_generation(copy.deepcopy(self._entity_manager.get_all_dicts()))
+        schema = strip_for_generation(copy.deepcopy(self._entity_manager.get_all_dicts()))
+        for entity in schema:
+            dynamic = entity.get("dynamic_property", {})
+            if isinstance(dynamic, dict):
+                entity["dynamic_property"] = {
+                    name: definition
+                    for name, definition in dynamic.items()
+                    if not isinstance(definition, dict) or definition.get("order", 1) < 2
+                }
+        return schema
 
     async def extract(
         self,
